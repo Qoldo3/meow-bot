@@ -66,6 +66,7 @@ type TelegramUpdate = {
 };
 
 type DuelState = {
+  id: string;
   challengerId: number;
   challengerName: string;
   targetId: number;
@@ -76,7 +77,9 @@ type DuelState = {
   createdAt: number;
 };
 
+// Duels are keyed by duelId (see comment on activeDuels below for why).
 const activeDuels = new Map<string, DuelState>();
+const duelTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
 
 const app = new Hono<{ Bindings: Bindings }>();
 
@@ -89,17 +92,32 @@ async function telegramRequest(
   method: string,
   body: Record<string, unknown>
 ): Promise<any> {
-  const res = await fetch(
-    `https://api.telegram.org/bot${token}/${method}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }
-  );
-  const json = await res.json();
-  console.log(`[TG ${method}]`, JSON.stringify(json).slice(0, 500));
+  const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const json: any = await res.json();
+  // Only log failures — logging every successful call drowns real errors
+  // in noise once the bot has any real traffic.
+  if (!json.ok) {
+    console.error(`[TG ${method}] failed:`, JSON.stringify(json).slice(0, 500));
+  }
   return json;
+}
+
+function sendMessage(
+  token: string,
+  chatId: number,
+  text: string,
+  extra: Record<string, unknown> = {}
+) {
+  return telegramRequest(token, "sendMessage", {
+    chat_id: chatId,
+    text,
+    parse_mode: "HTML",
+    ...extra,
+  });
 }
 
 async function answerCallback(
@@ -131,6 +149,20 @@ async function editMessageText(
   });
 }
 
+async function isGroupAdmin(
+  token: string,
+  chatId: number,
+  userId: number
+): Promise<boolean> {
+  const res = await telegramRequest(token, "getChatMember", {
+    chat_id: chatId,
+    user_id: userId,
+  });
+  if (!res.ok) return false;
+  const status = res.result?.status;
+  return status === "administrator" || status === "creator";
+}
+
 /* =========================================================
    INLINE KEYBOARDS
 ========================================================= */
@@ -146,9 +178,7 @@ function mainMenuKeyboard() {
         { text: "🏆 رتبه گروه", callback_data: "cmd:top" },
         { text: "🌍 رتبه جهانی", callback_data: "cmd:global" },
       ],
-      [
-        { text: "⚙️ تنظیمات گروه", callback_data: "menu:group_settings" },
-      ],
+      [{ text: "⚙️ تنظیمات گروه", callback_data: "menu:group_settings" }],
     ],
   };
 }
@@ -193,12 +223,8 @@ function groupSettingsKeyboard(enabled: boolean, cooldown: number) {
           callback_data: "group:toggle_bot",
         },
       ],
-      [
-        { text: `⏱️ کول‌داون: ${cooldown}s`, callback_data: "group:set_cooldown" },
-      ],
-      [
-        { text: "🔄 ریست لیدربورد", callback_data: "group:reset_lb" },
-      ],
+      [{ text: `⏱️ کول‌داون: ${cooldown}s`, callback_data: "group:set_cooldown" }],
+      [{ text: "🔄 ریست لیدربورد", callback_data: "group:reset_lb" }],
       [{ text: "🔙 بازگشت", callback_data: "menu:main" }],
     ],
   };
@@ -277,26 +303,63 @@ async function getGlobalRank(db: D1Database, userId: number): Promise<number> {
   return result?.rank ?? 0;
 }
 
+async function isMaintenanceMode(db: D1Database): Promise<boolean> {
+  const row = await db.prepare(`SELECT value FROM bot_settings WHERE key = 'maintenance'`).first<{ value: string }>();
+  return row?.value === "1";
+}
+
+/**
+ * BUG FIX: Telegram usernames are case-insensitive, but the original code
+ * did `WHERE username = ?` on the raw text the user typed, so
+ * "/pay @JohnDoe 5" would silently fail to find a user stored as
+ * "johndoe". Comparing with LOWER() on both sides fixes that.
+ */
+async function findUserByUsername(db: D1Database, rawUsername: string) {
+  return db
+    .prepare(`SELECT telegram_id, first_name FROM users WHERE LOWER(username) = LOWER(?)`)
+    .bind(rawUsername)
+    .first<{ telegram_id: number; first_name: string }>();
+}
+
+/**
+ * BUG FIX: /pay and duel payouts used a plain
+ * `UPDATE group_members SET meow_points = meow_points + ? WHERE ...` to
+ * credit the receiving side. If that person had never been tracked in the
+ * group's leaderboard before (e.g. paid or won a duel without ever having
+ * sent "meow" there), the row doesn't exist, the UPDATE matches zero rows,
+ * and the points silently vanish from the group leaderboard while still
+ * landing in their global total — the two totals quietly drift apart.
+ * This upserts instead, the same pattern the meow-award path already uses.
+ *
+ * `last_meow_at` is deliberately left untouched — this isn't a meow event,
+ * and stamping it with "now" would incorrectly reset someone's cooldown.
+ */
+async function adjustGroupPoints(
+  db: D1Database,
+  groupId: number,
+  user: { id: number; username?: string; first_name: string },
+  delta: number
+) {
+  await db
+    .prepare(`
+      INSERT INTO group_members (
+        telegram_group_id, telegram_user_id, username, first_name, meow_points, total_meows, last_meow_at
+      ) VALUES (?, ?, ?, ?, ?, 0, NULL)
+      ON CONFLICT(telegram_group_id, telegram_user_id) DO UPDATE SET
+        username = excluded.username,
+        first_name = excluded.first_name,
+        meow_points = group_members.meow_points + ?
+    `)
+    .bind(groupId, user.id, user.username ?? null, user.first_name, delta, delta)
+    .run();
+}
+
 /* =========================================================
    ADMIN CHECKS
 ========================================================= */
 
 function isOwner(env: Bindings, userId: number): boolean {
   return env.BOT_OWNER_ID === String(userId);
-}
-
-async function isGroupAdmin(
-  token: string,
-  chatId: number,
-  userId: number
-): Promise<boolean> {
-  const res = await telegramRequest(token, "getChatMember", {
-    chat_id: chatId,
-    user_id: userId,
-  });
-  if (!res.ok) return false;
-  const status = res.result?.status;
-  return status === "administrator" || status === "creator";
 }
 
 /* =========================================================
@@ -337,34 +400,28 @@ async function awardMeow(
   db: D1Database,
   user: TelegramUser,
   chat: TelegramChat
-): Promise<number | null> {
+): Promise<number> {
   const now = Math.floor(Date.now() / 1000);
+  const isGroup = chat.type === "group" || chat.type === "supergroup";
 
   await ensureUser(db, user);
 
-  // Get group cooldown setting
   let cooldownSeconds = 300; // default 5 minutes
-  if (chat.type === "group" || chat.type === "supergroup") {
-    const settings = await getGroupSettings(db, chat.id);
-    cooldownSeconds = settings.cooldown;
-  }
+  if (isGroup) {
+    cooldownSeconds = (await getGroupSettings(db, chat.id)).cooldown;
 
-  // Check per-group cooldown
-  if (chat.type === "group" || chat.type === "supergroup") {
     const existing = await db
       .prepare(`SELECT last_meow_at FROM group_members WHERE telegram_group_id = ? AND telegram_user_id = ?`)
       .bind(chat.id, user.id)
       .first<{ last_meow_at: number | null }>();
 
     if (existing?.last_meow_at && now - existing.last_meow_at < cooldownSeconds) {
-      const remaining = cooldownSeconds - (now - existing.last_meow_at);
-      return -remaining; // Return negative remaining seconds for cooldown message
+      return -(cooldownSeconds - (now - existing.last_meow_at)); // negative = seconds remaining
     }
   }
 
   const points = randomMeowPoints();
 
-  // Update global user
   await db
     .prepare(`
       UPDATE users SET
@@ -375,17 +432,15 @@ async function awardMeow(
     .bind(points, user.id)
     .run();
 
-  // Transaction log
   await db
     .prepare(`
       INSERT INTO transactions (telegram_user_id, group_id, amount, reason, created_at)
       VALUES (?, ?, ?, ?, ?)
     `)
-    .bind(user.id, chat.type === "private" ? null : chat.id, points, "MEOW", now)
+    .bind(user.id, isGroup ? chat.id : null, points, "MEOW", now)
     .run();
 
-  // Group-specific tracking
-  if (chat.type === "group" || chat.type === "supergroup") {
+  if (isGroup) {
     await ensureGroup(db, chat);
     await db
       .prepare(`
@@ -410,11 +465,7 @@ async function awardMeow(
    COMMAND HANDLERS
 ========================================================= */
 
-async function handleStart(
-  token: string,
-  db: D1Database,
-  message: TelegramMessage
-) {
+async function handleStart(token: string, db: D1Database, message: TelegramMessage) {
   if (!message.from) return;
   await ensureUser(db, message.from);
 
@@ -423,19 +474,10 @@ async function handleStart(
     ? `🐱 سلام <b>${escapeHtml(message.from.first_name)}</b>!\n\nبه دنیای Meow Points خوش اومدی! 🎉\n\nهر وقت توی گروه بنویسی <b>میو</b> یا <b>meow</b>، ممکنه امتیاز بگیری! ✨\n\nاز منوی زیر استفاده کن:`
     : `🐱 سلام گروه!\n\nمنوهای من با دکمه‌های شیشه‌ای کار می‌کنن. برای دیدن منو، روی دکمه‌ها کلیک کنید یا دستورات رو بفرستید.`;
 
-  await telegramRequest(token, "sendMessage", {
-    chat_id: message.chat.id,
-    text,
-    parse_mode: "HTML",
-    reply_markup: mainMenuKeyboard(),
-  });
+  await sendMessage(token, message.chat.id, text, { reply_markup: mainMenuKeyboard() });
 }
 
-async function handleMe(
-  token: string,
-  db: D1Database,
-  message: TelegramMessage
-) {
+async function handleMe(token: string, db: D1Database, message: TelegramMessage) {
   if (!message.from) return;
   await ensureUser(db, message.from);
 
@@ -448,24 +490,23 @@ async function handleMe(
     `🐾 Total Meows: <b>${stats?.total_meows ?? 0}</b>\n` +
     `🏆 رتبه جهانی: <b>#${rank}</b>`;
 
-  await telegramRequest(token, "sendMessage", {
-    chat_id: message.chat.id,
-    text,
-    parse_mode: "HTML",
-    reply_markup: mainMenuKeyboard(),
-  });
+  await sendMessage(token, message.chat.id, text, { reply_markup: mainMenuKeyboard() });
 }
 
-async function handleTop(
-  token: string,
-  db: D1Database,
-  message: TelegramMessage
-) {
+function formatLeaderboard(rows: { first_name: string; username: string | null; meow_points: number }[]) {
+  const medals = ["🥇", "🥈", "🥉"];
+  return rows
+    .map((u, i) => {
+      const medal = medals[i] || `${i + 1}.`;
+      const name = escapeHtml(u.first_name || u.username || "Unknown Cat");
+      return `${medal} ${name} — ${u.meow_points} MP`;
+    })
+    .join("\n");
+}
+
+async function handleTop(token: string, db: D1Database, message: TelegramMessage) {
   if (message.chat.type === "private") {
-    await telegramRequest(token, "sendMessage", {
-      chat_id: message.chat.id,
-      text: "🐱 دستور /top فقط داخل گروه کار می‌کنه!",
-    });
+    await sendMessage(token, message.chat.id, "🐱 دستور /top فقط داخل گروه کار می‌کنه!");
     return;
   }
 
@@ -481,32 +522,14 @@ async function handleTop(
     .all<{ first_name: string; username: string | null; meow_points: number }>();
 
   if (!results.results.length) {
-    await telegramRequest(token, "sendMessage", {
-      chat_id: message.chat.id,
-      text: "🐱 هنوز کسی Meow نکرده!",
-    });
+    await sendMessage(token, message.chat.id, "🐱 هنوز کسی Meow نکرده!");
     return;
   }
 
-  const medals = ["🥇", "🥈", "🥉"];
-  const lines = results.results.map((u, i) => {
-    const medal = medals[i] || `${i + 1}.`;
-    const name = escapeHtml(u.first_name || u.username || "Unknown Cat");
-    return `${medal} ${name} — ${u.meow_points} MP`;
-  });
-
-  await telegramRequest(token, "sendMessage", {
-    chat_id: message.chat.id,
-    text: `🏆 <b>Meow Leaderboard</b>\n\n${lines.join("\n")}`,
-    parse_mode: "HTML",
-  });
+  await sendMessage(token, message.chat.id, `🏆 <b>Meow Leaderboard</b>\n\n${formatLeaderboard(results.results)}`);
 }
 
-async function handleGlobal(
-  token: string,
-  db: D1Database,
-  message: TelegramMessage
-) {
+async function handleGlobal(token: string, db: D1Database, message: TelegramMessage) {
   const results = await db
     .prepare(`
       SELECT first_name, username, meow_points
@@ -517,32 +540,14 @@ async function handleGlobal(
     .all<{ first_name: string; username: string | null; meow_points: number }>();
 
   if (!results.results.length) {
-    await telegramRequest(token, "sendMessage", {
-      chat_id: message.chat.id,
-      text: "🐱 هنوز کسی Meow نکرده!",
-    });
+    await sendMessage(token, message.chat.id, "🐱 هنوز کسی Meow نکرده!");
     return;
   }
 
-  const medals = ["🥇", "🥈", "🥉"];
-  const lines = results.results.map((u, i) => {
-    const medal = medals[i] || `${i + 1}.`;
-    const name = escapeHtml(u.first_name || u.username || "Unknown Cat");
-    return `${medal} ${name} — ${u.meow_points} MP`;
-  });
-
-  await telegramRequest(token, "sendMessage", {
-    chat_id: message.chat.id,
-    text: `🌍 <b>Global Meow Leaderboard</b>\n\n${lines.join("\n")}`,
-    parse_mode: "HTML",
-  });
+  await sendMessage(token, message.chat.id, `🌍 <b>Global Meow Leaderboard</b>\n\n${formatLeaderboard(results.results)}`);
 }
 
-async function handleDaily(
-  token: string,
-  db: D1Database,
-  message: TelegramMessage
-) {
+async function handleDaily(token: string, db: D1Database, message: TelegramMessage) {
   if (!message.from) return;
   await ensureUser(db, message.from);
 
@@ -555,10 +560,7 @@ async function handleDaily(
   if (user?.last_daily_at && now - user.last_daily_at < 86400) {
     const remaining = 86400 - (now - user.last_daily_at);
     const hours = Math.ceil(remaining / 3600);
-    await telegramRequest(token, "sendMessage", {
-      chat_id: message.chat.id,
-      text: `🎁 جایزه امروزت رو قبلاً گرفتی!\n\n⏰ حدود ${hours} ساعت دیگه دوباره امتحان کن.`,
-    });
+    await sendMessage(token, message.chat.id, `🎁 جایزه امروزت رو قبلاً گرفتی!\n\n⏰ حدود ${hours} ساعت دیگه دوباره امتحان کن.`);
     return;
   }
 
@@ -580,48 +582,29 @@ async function handleDaily(
     .bind(message.from.id, reward, "DAILY_REWARD", now)
     .run();
 
-  await telegramRequest(token, "sendMessage", {
-    chat_id: message.chat.id,
-    text: `🎁 <b>جایزه روزانه!</b>\n\n💰 +${reward} Meow Points\n🔥 Streak: ${streak} روز`,
-    parse_mode: "HTML",
-  });
+  await sendMessage(token, message.chat.id, `🎁 <b>جایزه روزانه!</b>\n\n💰 +${reward} Meow Points\n🔥 Streak: ${streak} روز`);
 }
 
-async function handlePay(
-  token: string,
-  db: D1Database,
-  message: TelegramMessage
-) {
+async function handlePay(token: string, db: D1Database, message: TelegramMessage) {
   if (!message.from) return;
   if (message.chat.type === "private") {
-    await telegramRequest(token, "sendMessage", {
-      chat_id: message.chat.id,
-      text: "🐱 انتقال امتیاز فقط داخل گروه انجام می‌شه!",
-    });
-	
+    await sendMessage(token, message.chat.id, "🐱 انتقال امتیاز فقط داخل گروه انجام می‌شه!");
     return;
   }
 
   const text = message.text || "";
   const parts = text.split(/\s+/);
   if (parts.length < 3) {
-    await telegramRequest(token, "sendMessage", {
-      chat_id: message.chat.id,
-      text: "🐱 نحوه استفاده:\n/pay @username 100",
-      reply_to_message_id: message.message_id,
-    });
+    await sendMessage(token, message.chat.id, "🐱 نحوه استفاده:\n/pay @username 100", { reply_to_message_id: message.message_id });
     return;
   }
 
-  const targetUsername = parts[1].replace(/^@/, "");
-  const amount = parseInt(parts[2], 10);
+  const targetUsername = normalizeUsername(parts[1]);
+  // FIX: Convert Persian/Arabic numerals to English before parsing
+  const amount = parseInt(toEnglishNumbers(parts[2]), 10);
 
-  if (isNaN(amount) || amount <= 0) {
-    await telegramRequest(token, "sendMessage", {
-      chat_id: message.chat.id,
-      text: "🐱 مقدار امتیاز نامعتبره!",
-      reply_to_message_id: message.message_id,
-    });
+  if (!Number.isFinite(amount) || amount <= 0) {
+    await sendMessage(token, message.chat.id, "🐱 مقدار امتیاز نامعتبره!", { reply_to_message_id: message.message_id });
     return;
   }
 
@@ -631,34 +614,19 @@ async function handlePay(
     .first<{ meow_points: number }>();
 
   if (!sender || sender.meow_points < amount) {
-    await telegramRequest(token, "sendMessage", {
-      chat_id: message.chat.id,
-      text: "🐱 امتیاز کافی نداری!",
-      reply_to_message_id: message.message_id,
-    });
+    await sendMessage(token, message.chat.id, "🐱 امتیاز کافی نداری!", { reply_to_message_id: message.message_id });
     return;
   }
 
-  const receiver = await db
-    .prepare(`SELECT telegram_id, first_name FROM users WHERE username = ?`)
-    .bind(targetUsername)
-    .first<{ telegram_id: number; first_name: string }>();
+  const receiver = await findUserByUsername(db, targetUsername);
 
   if (!receiver) {
-    await telegramRequest(token, "sendMessage", {
-      chat_id: message.chat.id,
-      text: "🐱 کاربری با این یوزرنیم پیدا نشد!",
-      reply_to_message_id: message.message_id,
-    });
+    await sendMessage(token, message.chat.id, "🐱 کاربری با این یوزرنیم پیدا نشد!", { reply_to_message_id: message.message_id });
     return;
   }
 
   if (receiver.telegram_id === message.from.id) {
-    await telegramRequest(token, "sendMessage", {
-      chat_id: message.chat.id,
-      text: "🐱 نمی‌تونی به خودت انتقال بدی!",
-      reply_to_message_id: message.message_id,
-    });
+    await sendMessage(token, message.chat.id, "🐱 نمی‌تونی به خودت انتقال بدی!", { reply_to_message_id: message.message_id });
     return;
   }
 
@@ -666,90 +634,94 @@ async function handlePay(
 
   await db.prepare(`UPDATE users SET meow_points = meow_points - ? WHERE telegram_id = ?`).bind(amount, message.from.id).run();
   await db.prepare(`UPDATE users SET meow_points = meow_points + ? WHERE telegram_id = ?`).bind(amount, receiver.telegram_id).run();
-  await db.prepare(`UPDATE group_members SET meow_points = meow_points - ? WHERE telegram_group_id = ? AND telegram_user_id = ?`).bind(amount, message.chat.id, message.from.id).run();
-  await db.prepare(`UPDATE group_members SET meow_points = meow_points + ? WHERE telegram_group_id = ? AND telegram_user_id = ?`).bind(amount, message.chat.id, receiver.telegram_id).run();
+
+  // Upsert (see adjustGroupPoints comment above) — the receiver may never
+  // have posted in this group before, so a plain UPDATE would drop these
+  // points from the group leaderboard.
+  await adjustGroupPoints(db, message.chat.id, { id: message.from.id, first_name: message.from.first_name, username: message.from.username }, -amount);
+  await adjustGroupPoints(db, message.chat.id, { id: receiver.telegram_id, first_name: receiver.first_name }, amount);
+
   await db.prepare(`INSERT INTO transactions (telegram_user_id, group_id, amount, reason, created_at) VALUES (?, ?, ?, ?, ?)`).bind(message.from.id, message.chat.id, -amount, `PAY_TO_${receiver.telegram_id}`, now).run();
   await db.prepare(`INSERT INTO transactions (telegram_user_id, group_id, amount, reason, created_at) VALUES (?, ?, ?, ?, ?)`).bind(receiver.telegram_id, message.chat.id, amount, `PAY_FROM_${message.from.id}`, now).run();
 
-  await telegramRequest(token, "sendMessage", {
-    chat_id: message.chat.id,
-    text: `💸 <b>انتقال موفق!</b>\n\n🐱 ${escapeHtml(message.from.first_name)}\n➡️ ${amount} MP\n🐱 ${escapeHtml(receiver.first_name)}`,
-    parse_mode: "HTML",
-  });
+  await sendMessage(
+    token,
+    message.chat.id,
+    `💸 <b>انتقال موفق!</b>\n\n🐱 ${escapeHtml(message.from.first_name)}\n➡️ ${amount} MP\n🐱 ${escapeHtml(receiver.first_name)}`
+  );
 }
 
 /* =========================================================
    DUEL SYSTEM
 ========================================================= */
 
+const DUEL_TIMEOUT_MS = 60_000;
+
 function generateDuelId(): string {
   return Math.random().toString(36).substring(2, 10);
 }
 
-async function handleDuelRequest(
-  token: string,
-  db: D1Database,
-  message: TelegramMessage
-) {
+function clearDuel(duelId: string) {
+  activeDuels.delete(duelId);
+  const timeout = duelTimeouts.get(duelId);
+  if (timeout) {
+    clearTimeout(timeout);
+    duelTimeouts.delete(duelId);
+  }
+}
+
+function findOpenDuelAgainst(groupId: number, targetId: number): string | undefined {
+  for (const [id, duel] of activeDuels) {
+    if (duel.groupId === groupId && duel.targetId === targetId) return id;
+  }
+  return undefined;
+}
+
+async function handleDuelRequest(token: string, db: D1Database, message: TelegramMessage) {
   if (!message.from) return;
   if (message.chat.type === "private") {
-    await telegramRequest(token, "sendMessage", {
-      chat_id: message.chat.id,
-      text: "🐱 دعوا فقط داخل گروه انجام می‌شه!",
-    });
+    await sendMessage(token, message.chat.id, "🐱 دعوا فقط داخل گروه انجام می‌شه!");
     return;
   }
 
   if (!message.reply_to_message || !message.reply_to_message.from) {
-    await telegramRequest(token, "sendMessage", {
-      chat_id: message.chat.id,
-      text: "🐱 برای دعوا، روی پیام حریفت ریپلای کن و بنویس:\n<code>دعوا 500</code>",
-      parse_mode: "HTML",
-      reply_to_message_id: message.message_id,
-    });
+    await sendMessage(
+      token,
+      message.chat.id,
+      "🐱 برای دعوا، روی پیام حریفت ریپلای کن و بنویس:\n<code>دعوا 500</code>",
+      { reply_to_message_id: message.message_id }
+    );
     return;
   }
 
   const target = message.reply_to_message.from;
 
   if (target.is_bot) {
-    await telegramRequest(token, "sendMessage", {
-      chat_id: message.chat.id,
-      text: "🐱 نمی‌تونی با ربات دعوا کنی!",
-      reply_to_message_id: message.message_id,
-    });
+    await sendMessage(token, message.chat.id, "🐱 نمی‌تونی با ربات دعوا کنی!", { reply_to_message_id: message.message_id });
     return;
   }
 
   if (target.id === message.from.id) {
-    await telegramRequest(token, "sendMessage", {
-      chat_id: message.chat.id,
-      text: "🐱 نمی‌تونی با خودت دعوا کنی!",
-      reply_to_message_id: message.message_id,
-    });
+    await sendMessage(token, message.chat.id, "🐱 نمی‌تونی با خودت دعوا کنی!", { reply_to_message_id: message.message_id });
     return;
   }
 
   const text = message.text || "";
   const parts = text.split(/\s+/);
   if (parts.length < 2) {
-    await telegramRequest(token, "sendMessage", {
-      chat_id: message.chat.id,
-      text: "🐱 نحوه استفاده:\nریپلای کن و بنویس <code>دعوا 500</code>",
-      parse_mode: "HTML",
-      reply_to_message_id: message.message_id,
-    });
+    await sendMessage(
+      token,
+      message.chat.id,
+      "🐱 نحوه استفاده:\nریپلای کن و بنویس <code>دعوا 500</code>",
+      { reply_to_message_id: message.message_id }
+    );
     return;
   }
 
-  // FIX: Convert Persian/Arabic numerals to English BEFORE parsing
+  // FIX: Convert Persian/Arabic numerals to English before parsing
   const amount = parseInt(toEnglishNumbers(parts[1]), 10);
-  if (isNaN(amount) || amount <= 0) {
-    await telegramRequest(token, "sendMessage", {
-      chat_id: message.chat.id,
-      text: "🐱 مقدار امتیاز نامعتبره!",
-      reply_to_message_id: message.message_id,
-    });
+  if (!Number.isFinite(amount) || amount <= 0) {
+    await sendMessage(token, message.chat.id, "🐱 مقدار امتیاز نامعتبره!", { reply_to_message_id: message.message_id });
     return;
   }
 
@@ -760,9 +732,7 @@ async function handleDuelRequest(
     .first<{ meow_points: number }>();
 
   if (!challenger || challenger.meow_points < amount) {
-    await telegramRequest(token, "sendMessage", {
-      chat_id: message.chat.id,
-      text: `🐱 امتیاز کافی نداری!\n💰 موجودی: ${challenger?.meow_points ?? 0} MP`,
+    await sendMessage(token, message.chat.id, `🐱 امتیاز کافی نداری!\n💰 موجودی: ${challenger?.meow_points ?? 0} MP`, {
       reply_to_message_id: message.message_id,
     });
     return;
@@ -775,20 +745,19 @@ async function handleDuelRequest(
     .first<{ meow_points: number }>();
 
   if (!targetUser || targetUser.meow_points < amount) {
-    await telegramRequest(token, "sendMessage", {
-      chat_id: message.chat.id,
-      text: `🐱 ${escapeHtml(target.first_name)} امتیاز کافی نداره!`,
+    await sendMessage(token, message.chat.id, `🐱 ${escapeHtml(target.first_name)} امتیاز کافی نداره!`, {
       reply_to_message_id: message.message_id,
     });
     return;
   }
 
-  const duelId = generateDuelId();
-  const duelKey = `${message.chat.id}:${target.id}`;
-  const existing = activeDuels.get(duelKey);
-  if (existing) activeDuels.delete(duelKey);
+  // Only one open challenge per target per group at a time.
+  const existingId = findOpenDuelAgainst(message.chat.id, target.id);
+  if (existingId) clearDuel(existingId);
 
+  const duelId = generateDuelId();
   const duel: DuelState = {
+    id: duelId,
     challengerId: message.from.id,
     challengerName: message.from.first_name,
     targetId: target.id,
@@ -813,27 +782,27 @@ async function handleDuelRequest(
     reply_markup: duelKeyboard(duelId),
   });
 
-  if (res.ok && res.result?.message_id) {
-    duel.messageId = res.result.message_id;
-    activeDuels.set(duelKey, duel);
+  if (!res.ok || !res.result?.message_id) return;
 
-    setTimeout(async () => {
-      const current = activeDuels.get(duelKey);
-      if (current && current.messageId === duel.messageId) {
-        activeDuels.delete(duelKey);
-        await telegramRequest(token, "editMessageText", {
-          chat_id: message.chat.id,
-          message_id: duel.messageId,
-          text:
-            `⏱️ <b>دعوا منقضی شد!</b>\n\n` +
-            `🐱 ${escapeHtml(duel.challengerName)} 🆚 ${escapeHtml(duel.targetName)}\n` +
-            `💰 ${duel.amount} MP\n\n` +
-            `❌ ${escapeHtml(duel.targetName)} جواب نداد.`,
-          parse_mode: "HTML",
-        });
-      }
-    }, 60000);
-  }
+  duel.messageId = res.result.message_id;
+  activeDuels.set(duelId, duel);
+
+  const timeout = setTimeout(async () => {
+    if (!activeDuels.has(duelId)) return;
+    clearDuel(duelId);
+    await telegramRequest(token, "editMessageText", {
+      chat_id: duel.groupId,
+      message_id: duel.messageId,
+      text:
+        `⏱️ <b>دعوا منقضی شد!</b>\n\n` +
+        `🐱 ${escapeHtml(duel.challengerName)} 🆚 ${escapeHtml(duel.targetName)}\n` +
+        `💰 ${duel.amount} MP\n\n` +
+        `❌ ${escapeHtml(duel.targetName)} جواب نداد.`,
+      parse_mode: "HTML",
+    });
+  }, DUEL_TIMEOUT_MS);
+
+  duelTimeouts.set(duelId, timeout);
 }
 
 async function handleDuelAccept(
@@ -842,24 +811,29 @@ async function handleDuelAccept(
   callback: TelegramCallbackQuery,
   duelId: string
 ) {
-  if (!callback.message || !callback.from) return;
+  if (!callback.message) return;
 
-  const chatId = callback.message.chat.id;
-  const userId = callback.from.id;
-  const duelKey = `${chatId}:${userId}`;
+  // BUG FIX: the original code keyed activeDuels by `${chatId}:${userId}`,
+  // where userId was whoever clicked the button. That works when the
+  // *target* accepts, but if the *challenger* tries to decline/cancel
+  // their own duel, the lookup key becomes `${chatId}:${challengerId}` —
+  // which was never the key the duel was stored under — so the cancel
+  // silently reports "duel expired" instead of actually cancelling it.
+  // Keying by duelId (already sitting unused in the button's
+  // callback_data) fixes this regardless of who clicks.
+  const duel = activeDuels.get(duelId);
 
-  const duel = activeDuels.get(duelKey);
   if (!duel || duel.messageId !== callback.message.message_id) {
     await answerCallback(token, callback.id, "🐱 این دعوا منقضی شده!", true);
     return;
   }
 
-  if (duel.targetId !== userId) {
+  if (duel.targetId !== callback.from.id) {
     await answerCallback(token, callback.id, "🐱 فقط حریف می‌تونه قبول کنه!", true);
     return;
   }
 
-  activeDuels.delete(duelKey);
+  clearDuel(duelId);
 
   const challenger = await db
     .prepare(`SELECT meow_points FROM users WHERE telegram_id = ?`)
@@ -872,12 +846,7 @@ async function handleDuelAccept(
     .first<{ meow_points: number }>();
 
   if (!challenger || challenger.meow_points < duel.amount || !target || target.meow_points < duel.amount) {
-    await telegramRequest(token, "editMessageText", {
-      chat_id: chatId,
-      message_id: duel.messageId,
-      text: "❌ <b>دعوا لغو شد!</b>\n\nیکی از بازیکن‌ها امتیاز کافی نداره.",
-      parse_mode: "HTML",
-    });
+    await editMessageText(token, duel.groupId, duel.messageId, "❌ <b>دعوا لغو شد!</b>\n\nیکی از بازیکن‌ها امتیاز کافی نداره.");
     await answerCallback(token, callback.id);
     return;
   }
@@ -886,21 +855,20 @@ async function handleDuelAccept(
   const targetRoll = Math.floor(Math.random() * 100) + 1;
 
   if (challengerRoll === targetRoll) {
-    await telegramRequest(token, "editMessageText", {
-      chat_id: chatId,
-      message_id: duel.messageId,
-      text:
-        `🎲 <b>دعوای Meow!</b>\n\n` +
+    await editMessageText(
+      token,
+      duel.groupId,
+      duel.messageId,
+      `🎲 <b>دعوای Meow!</b>\n\n` +
         `🐱 ${escapeHtml(duel.challengerName)}: ${challengerRoll}\n` +
         `🐱 ${escapeHtml(duel.targetName)}: ${targetRoll}\n\n` +
-        `🤝 <b>مساوی!</b>\nهیچ‌کس امتیازی نمی‌بره.`,
-      parse_mode: "HTML",
-    });
+        `🤝 <b>مساوی!</b>\nهیچ‌کس امتیازی نمی‌بره.`
+    );
     await answerCallback(token, callback.id);
     return;
   }
 
-  const winner = challengerRoll > targetRoll ? duel.challengerId : duel.targetId;
+  const winnerId = challengerRoll > targetRoll ? duel.challengerId : duel.targetId;
   const winnerName = challengerRoll > targetRoll ? duel.challengerName : duel.targetName;
 
   const now = Math.floor(Date.now() / 1000);
@@ -908,62 +876,57 @@ async function handleDuelAccept(
 
   await db.prepare(`UPDATE users SET meow_points = meow_points - ? WHERE telegram_id = ?`).bind(duel.amount, duel.challengerId).run();
   await db.prepare(`UPDATE users SET meow_points = meow_points - ? WHERE telegram_id = ?`).bind(duel.amount, duel.targetId).run();
-  await db.prepare(`UPDATE users SET meow_points = meow_points + ? WHERE telegram_id = ?`).bind(pot, winner).run();
-  await db.prepare(`UPDATE group_members SET meow_points = meow_points - ? WHERE telegram_group_id = ? AND telegram_user_id = ?`).bind(duel.amount, chatId, duel.challengerId).run();
-  await db.prepare(`UPDATE group_members SET meow_points = meow_points - ? WHERE telegram_group_id = ? AND telegram_user_id = ?`).bind(duel.amount, chatId, duel.targetId).run();
-  await db.prepare(`UPDATE group_members SET meow_points = meow_points + ? WHERE telegram_group_id = ? AND telegram_user_id = ?`).bind(pot, chatId, winner).run();
-  await db.prepare(`INSERT INTO transactions (telegram_user_id, group_id, amount, reason, created_at) VALUES (?, ?, ?, ?, ?)`).bind(duel.challengerId, chatId, -duel.amount, `DUEL_BET`, now).run();
-  await db.prepare(`INSERT INTO transactions (telegram_user_id, group_id, amount, reason, created_at) VALUES (?, ?, ?, ?, ?)`).bind(duel.targetId, chatId, -duel.amount, `DUEL_BET`, now).run();
-  await db.prepare(`INSERT INTO transactions (telegram_user_id, group_id, amount, reason, created_at) VALUES (?, ?, ?, ?, ?)`).bind(winner, chatId, pot, `DUEL_WIN`, now).run();
+  await db.prepare(`UPDATE users SET meow_points = meow_points + ? WHERE telegram_id = ?`).bind(pot, winnerId).run();
 
-  await telegramRequest(token, "editMessageText", {
-    chat_id: chatId,
-    message_id: duel.messageId,
-    text:
-      `🎲 <b>دعوای Meow!</b>\n\n` +
+  // Upserts (see adjustGroupPoints) so points land correctly on the group
+  // leaderboard even if a player had never sent "meow" in this group.
+  await adjustGroupPoints(db, duel.groupId, { id: duel.challengerId, first_name: duel.challengerName }, -duel.amount);
+  await adjustGroupPoints(db, duel.groupId, { id: duel.targetId, first_name: duel.targetName }, -duel.amount);
+  await adjustGroupPoints(db, duel.groupId, { id: winnerId, first_name: winnerName }, pot);
+
+  await db.prepare(`INSERT INTO transactions (telegram_user_id, group_id, amount, reason, created_at) VALUES (?, ?, ?, ?, ?)`).bind(duel.challengerId, duel.groupId, -duel.amount, `DUEL_BET`, now).run();
+  await db.prepare(`INSERT INTO transactions (telegram_user_id, group_id, amount, reason, created_at) VALUES (?, ?, ?, ?, ?)`).bind(duel.targetId, duel.groupId, -duel.amount, `DUEL_BET`, now).run();
+  await db.prepare(`INSERT INTO transactions (telegram_user_id, group_id, amount, reason, created_at) VALUES (?, ?, ?, ?, ?)`).bind(winnerId, duel.groupId, pot, `DUEL_WIN`, now).run();
+
+  await editMessageText(
+    token,
+    duel.groupId,
+    duel.messageId,
+    `🎲 <b>دعوای Meow!</b>\n\n` +
       `🐱 ${escapeHtml(duel.challengerName)}: ${challengerRoll}\n` +
       `🐱 ${escapeHtml(duel.targetName)}: ${targetRoll}\n\n` +
       `🏆 <b>${escapeHtml(winnerName)} برنده شد!</b>\n` +
-      `💰 +${pot} MP`,
-    parse_mode: "HTML",
-  });
+      `💰 +${pot} MP`
+  );
 
   await answerCallback(token, callback.id, "🎲 دعوا انجام شد!");
 }
 
-async function handleDuelDecline(
-  token: string,
-  callback: TelegramCallbackQuery,
-  duelId: string
-) {
-  if (!callback.message || !callback.from) return;
+async function handleDuelDecline(token: string, callback: TelegramCallbackQuery, duelId: string) {
+  if (!callback.message) return;
 
-  const chatId = callback.message.chat.id;
-  const userId = callback.from.id;
-  const duelKey = `${chatId}:${userId}`;
+  const duel = activeDuels.get(duelId);
 
-  const duel = activeDuels.get(duelKey);
   if (!duel || duel.messageId !== callback.message.message_id) {
     await answerCallback(token, callback.id, "🐱 این دعوا منقضی شده!", true);
     return;
   }
 
-  if (duel.targetId !== userId && duel.challengerId !== userId) {
+  if (duel.targetId !== callback.from.id && duel.challengerId !== callback.from.id) {
     await answerCallback(token, callback.id, "🐱 این دعوا مال تو نیست!", true);
     return;
   }
 
-  activeDuels.delete(duelKey);
+  clearDuel(duelId);
 
-  await telegramRequest(token, "editMessageText", {
-    chat_id: chatId,
-    message_id: duel.messageId,
-    text:
-      `❌ <b>دعوا لغو شد!</b>\n\n` +
+  await editMessageText(
+    token,
+    duel.groupId,
+    duel.messageId,
+    `❌ <b>دعوا لغو شد!</b>\n\n` +
       `🐱 ${escapeHtml(duel.challengerName)} 🆚 ${escapeHtml(duel.targetName)}\n` +
-      `💰 ${duel.amount} MP`,
-    parse_mode: "HTML",
-  });
+      `💰 ${duel.amount} MP`
+  );
 
   await answerCallback(token, callback.id, "✅ دعوا لغو شد.");
 }
@@ -972,26 +935,14 @@ async function handleDuelDecline(
    OWNER ADMIN PANEL (/admin)
 ========================================================= */
 
-async function handleAdmin(
-  token: string,
-  env: Bindings,
-  message: TelegramMessage
-) {
+async function handleAdmin(token: string, env: Bindings, message: TelegramMessage) {
   if (!message.from || !isOwner(env, message.from.id)) {
-    await telegramRequest(token, "sendMessage", {
-      chat_id: message.chat.id,
-      text: "🚫 دسترسی غیرمجاز!",
-    });
+    await sendMessage(token, message.chat.id, "🚫 دسترسی غیرمجاز!");
     return;
   }
 
-  const stats = await env.DB
-    .prepare(`SELECT COUNT(*) as count FROM users`)
-    .first<{ count: number }>();
-
-  const groups = await env.DB
-    .prepare(`SELECT COUNT(*) as count FROM telegram_groups`)
-    .first<{ count: number }>();
+  const stats = await env.DB.prepare(`SELECT COUNT(*) as count FROM users`).first<{ count: number }>();
+  const groups = await env.DB.prepare(`SELECT COUNT(*) as count FROM telegram_groups`).first<{ count: number }>();
 
   const text =
     `🛡️ <b>Owner Panel</b>\n\n` +
@@ -999,28 +950,16 @@ async function handleAdmin(
     `👥 گروه‌ها: <b>${groups?.count ?? 0}</b>\n\n` +
     `از دکمه‌ها استفاده کن:`;
 
-  await telegramRequest(token, "sendMessage", {
-    chat_id: message.chat.id,
-    text,
-    parse_mode: "HTML",
-    reply_markup: ownerPanelKeyboard(),
-  });
+  await sendMessage(token, message.chat.id, text, { reply_markup: ownerPanelKeyboard() });
 }
 
 /* =========================================================
    GROUP SETTINGS (/settings)
 ========================================================= */
 
-async function handleGroupSettings(
-  token: string,
-  db: D1Database,
-  message: TelegramMessage
-) {
+async function handleGroupSettings(token: string, db: D1Database, message: TelegramMessage) {
   if (message.chat.type === "private") {
-    await telegramRequest(token, "sendMessage", {
-      chat_id: message.chat.id,
-      text: "🐱 این دستور فقط داخل گروه کار می‌کنه!",
-    });
+    await sendMessage(token, message.chat.id, "🐱 این دستور فقط داخل گروه کار می‌کنه!");
     return;
   }
 
@@ -1028,9 +967,7 @@ async function handleGroupSettings(
 
   const isAdmin = await isGroupAdmin(token, message.chat.id, message.from.id);
   if (!isAdmin) {
-    await telegramRequest(token, "sendMessage", {
-      chat_id: message.chat.id,
-      text: "🚫 فقط ادمین‌های گروه می‌تونن تنظیمات رو تغییر بدن!",
+    await sendMessage(token, message.chat.id, "🚫 فقط ادمین‌های گروه می‌تونن تنظیمات رو تغییر بدن!", {
       reply_to_message_id: message.message_id,
     });
     return;
@@ -1044,12 +981,7 @@ async function handleGroupSettings(
     `🤖 وضعیت ربات: ${settings.enabled ? "✅ روشن" : "❌ خاموش"}\n` +
     `⏱️ کول‌داون: ${settings.cooldown} ثانیه`;
 
-  await telegramRequest(token, "sendMessage", {
-    chat_id: message.chat.id,
-    text,
-    parse_mode: "HTML",
-    reply_markup: groupSettingsKeyboard(settings.enabled, settings.cooldown),
-  });
+  await sendMessage(token, message.chat.id, text, { reply_markup: groupSettingsKeyboard(settings.enabled, settings.cooldown) });
 }
 
 /* =========================================================
@@ -1202,19 +1134,11 @@ async function handleCallbackQuery(
    OWNER COMMANDS (text-based for precision)
 ========================================================= */
 
-async function handleOwnerBroadcast(
-  token: string,
-  db: D1Database,
-  env: Bindings,
-  message: TelegramMessage
-) {
+async function handleOwnerBroadcast(token: string, db: D1Database, env: Bindings, message: TelegramMessage) {
   if (!message.from || !isOwner(env, message.from.id)) return;
   const text = (message.text || "").replace(/^\/broadcast\s*/, "");
   if (!text) {
-    await telegramRequest(token, "sendMessage", {
-      chat_id: message.chat.id,
-      text: "🐱 نحوه استفاده: /broadcast پیام",
-    });
+    await sendMessage(token, message.chat.id, "🐱 نحوه استفاده: /broadcast پیام");
     return;
   }
 
@@ -1228,38 +1152,28 @@ async function handleOwnerBroadcast(
       text: `📢 <b>پیام از طرف ادمین</b>\n\n${escapeHtml(text)}`,
       parse_mode: "HTML",
     });
-    if (res.ok) sent++; else failed++;
+    if (res.ok) sent++;
+    else failed++;
   }
 
-  await telegramRequest(token, "sendMessage", {
-    chat_id: message.chat.id,
-    text: `📢 ارسال شد!\n\n✅ موفق: ${sent}\n❌ ناموفق: ${failed}`,
-  });
+  await sendMessage(token, message.chat.id, `📢 ارسال شد!\n\n✅ موفق: ${sent}\n❌ ناموفق: ${failed}`);
 }
 
-async function handleOwnerAddPoints(
-  token: string,
-  db: D1Database,
-  env: Bindings,
-  message: TelegramMessage
-) {
+async function handleOwnerAddPoints(token: string, db: D1Database, env: Bindings, message: TelegramMessage) {
   if (!message.from || !isOwner(env, message.from.id)) return;
   const parts = (message.text || "").split(/\s+/);
   if (parts.length < 3) {
-    await telegramRequest(token, "sendMessage", {
-      chat_id: message.chat.id,
-      text: "🐱 /addpoints @username 100",
-    });
+    await sendMessage(token, message.chat.id, "🐱 /addpoints @username 100");
     return;
   }
 
-  const target = parts[1].replace(/^@/, "");
-  const amount = parseInt(parts[2], 10);
-  if (isNaN(amount)) return;
+  // FIX: Convert Persian/Arabic numerals to English before parsing
+  const amount = parseInt(toEnglishNumbers(parts[2]), 10);
+  if (!Number.isFinite(amount)) return;
 
-  const user = await db.prepare(`SELECT telegram_id, first_name FROM users WHERE username = ?`).bind(target).first<{ telegram_id: number; first_name: string }>();
+  const user = await findUserByUsername(db, normalizeUsername(parts[1]));
   if (!user) {
-    await telegramRequest(token, "sendMessage", { chat_id: message.chat.id, text: "کاربر پیدا نشد!" });
+    await sendMessage(token, message.chat.id, "کاربر پیدا نشد!");
     return;
   }
 
@@ -1267,36 +1181,24 @@ async function handleOwnerAddPoints(
   await db.prepare(`INSERT INTO transactions (telegram_user_id, amount, reason, created_at) VALUES (?, ?, ?, ?)`)
     .bind(user.telegram_id, amount, "OWNER_ADD", Math.floor(Date.now() / 1000)).run();
 
-  await telegramRequest(token, "sendMessage", {
-    chat_id: message.chat.id,
-    text: `✅ ${amount} MP به ${escapeHtml(user.first_name)} اضافه شد!`,
-    parse_mode: "HTML",
-  });
+  await sendMessage(token, message.chat.id, `✅ ${amount} MP به ${escapeHtml(user.first_name)} اضافه شد!`);
 }
 
-async function handleOwnerRemovePoints(
-  token: string,
-  db: D1Database,
-  env: Bindings,
-  message: TelegramMessage
-) {
+async function handleOwnerRemovePoints(token: string, db: D1Database, env: Bindings, message: TelegramMessage) {
   if (!message.from || !isOwner(env, message.from.id)) return;
   const parts = (message.text || "").split(/\s+/);
   if (parts.length < 3) {
-    await telegramRequest(token, "sendMessage", {
-      chat_id: message.chat.id,
-      text: "🐱 /removepoints @username 100",
-    });
+    await sendMessage(token, message.chat.id, "🐱 /removepoints @username 100");
     return;
   }
 
-  const target = parts[1].replace(/^@/, "");
-  const amount = parseInt(parts[2], 10);
-  if (isNaN(amount)) return;
+  // FIX: Convert Persian/Arabic numerals to English before parsing
+  const amount = parseInt(toEnglishNumbers(parts[2]), 10);
+  if (!Number.isFinite(amount)) return;
 
-  const user = await db.prepare(`SELECT telegram_id, first_name FROM users WHERE username = ?`).bind(target).first<{ telegram_id: number; first_name: string }>();
+  const user = await findUserByUsername(db, normalizeUsername(parts[1]));
   if (!user) {
-    await telegramRequest(token, "sendMessage", { chat_id: message.chat.id, text: "کاربر پیدا نشد!" });
+    await sendMessage(token, message.chat.id, "کاربر پیدا نشد!");
     return;
   }
 
@@ -1304,33 +1206,20 @@ async function handleOwnerRemovePoints(
   await db.prepare(`INSERT INTO transactions (telegram_user_id, amount, reason, created_at) VALUES (?, ?, ?, ?)`)
     .bind(user.telegram_id, -amount, "OWNER_REMOVE", Math.floor(Date.now() / 1000)).run();
 
-  await telegramRequest(token, "sendMessage", {
-    chat_id: message.chat.id,
-    text: `✅ ${amount} MP از ${escapeHtml(user.first_name)} کم شد!`,
-    parse_mode: "HTML",
-  });
+  await sendMessage(token, message.chat.id, `✅ ${amount} MP از ${escapeHtml(user.first_name)} کم شد!`);
 }
 
-async function handleOwnerResetUser(
-  token: string,
-  db: D1Database,
-  env: Bindings,
-  message: TelegramMessage
-) {
+async function handleOwnerResetUser(token: string, db: D1Database, env: Bindings, message: TelegramMessage) {
   if (!message.from || !isOwner(env, message.from.id)) return;
   const parts = (message.text || "").split(/\s+/);
   if (parts.length < 2) {
-    await telegramRequest(token, "sendMessage", {
-      chat_id: message.chat.id,
-      text: "🐱 /resetuser @username",
-    });
+    await sendMessage(token, message.chat.id, "🐱 /resetuser @username");
     return;
   }
 
-  const target = parts[1].replace(/^@/, "");
-  const user = await db.prepare(`SELECT telegram_id, first_name FROM users WHERE username = ?`).bind(target).first<{ telegram_id: number; first_name: string }>();
+  const user = await findUserByUsername(db, normalizeUsername(parts[1]));
   if (!user) {
-    await telegramRequest(token, "sendMessage", { chat_id: message.chat.id, text: "کاربر پیدا نشد!" });
+    await sendMessage(token, message.chat.id, "کاربر پیدا نشد!");
     return;
   }
 
@@ -1338,24 +1227,11 @@ async function handleOwnerResetUser(
   await db.prepare(`DELETE FROM group_members WHERE telegram_user_id = ?`).bind(user.telegram_id).run();
   await db.prepare(`DELETE FROM transactions WHERE telegram_user_id = ?`).bind(user.telegram_id).run();
 
-  await telegramRequest(token, "sendMessage", {
-    chat_id: message.chat.id,
-    text: `🔄 کاربر ${escapeHtml(user.first_name)} کاملاً ریست شد!`,
-    parse_mode: "HTML",
-  });
+  await sendMessage(token, message.chat.id, `🔄 کاربر ${escapeHtml(user.first_name)} کاملاً ریست شد!`);
 }
 
 /* =========================================================
-   MAINTENANCE CHECK
-========================================================= */
-
-async function isMaintenanceMode(db: D1Database): Promise<boolean> {
-  const row = await db.prepare(`SELECT value FROM bot_settings WHERE key = 'maintenance'`).first<{ value: string }>();
-  return row?.value === "1";
-}
-
-/* =========================================================
-   HTML ESCAPE
+   HTML ESCAPE & USERNAME NORMALIZATION & NUMBER CONVERSION
 ========================================================= */
 
 function escapeHtml(text: string): string {
@@ -1366,39 +1242,53 @@ function escapeHtml(text: string): string {
     .replace(/"/g, "&quot;");
 }
 
-/* =========================================================
-   NUMBER CONVERSION
-========================================================= */
+/**
+ * Strips a leading '@' and lower-cases so username lookups match the way
+ * Telegram usernames actually behave (case-insensitive). See
+ * findUserByUsername for the matching DB-side fix.
+ */
+function normalizeUsername(raw: string): string {
+  return raw.replace(/^@/, "").toLowerCase();
+}
 
+function formatDuration(totalSeconds: number): string {
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  let text = "";
+  if (minutes > 0) text += `${minutes} دقیقه `;
+  if (seconds > 0) text += `${seconds} ثانیه`;
+  return text.trim();
+}
+
+/**
+ * Converts Persian (۰-۹) and Arabic (٠-٩) numerals to English (0-9).
+ * Applied before parseInt on all user-provided numbers so commands like
+ * /pay @user ۵۰۰ or دعوا ۵۰۰ work correctly.
+ */
 function toEnglishNumbers(str: string): string {
   const persian = /[۰-۹]/g;
   const arabic = /[٠-٩]/g;
-  
+
   return str
     .replace(persian, (w) => String.fromCharCode(w.charCodeAt(0) - 1728))
     .replace(arabic, (w) => String.fromCharCode(w.charCodeAt(0) - 1584));
 }
 
-
 /* =========================================================
    WELCOME MESSAGE WHEN BOT IS ADDED TO GROUP
 ========================================================= */
 
-async function handleMyChatMember(
-  token: string,
-  db: D1Database,
-  update: TelegramChatMemberUpdated
-) {
+async function handleMyChatMember(token: string, db: D1Database, update: TelegramChatMemberUpdated) {
   const { chat, new_chat_member } = update;
 
   if (new_chat_member.user.is_bot && new_chat_member.status === "member") {
     if (chat.type === "group" || chat.type === "supergroup") {
       await ensureGroup(db, chat);
 
-      await telegramRequest(token, "sendMessage", {
-        chat_id: chat.id,
-        text:
-          `🐱 <b>سلام گروه!</b>\n\n` +
+      await sendMessage(
+        token,
+        chat.id,
+        `🐱 <b>سلام گروه!</b>\n\n` +
           `من Meow Points Bot هستم! 🎉\n\n` +
           `هر وقت کسی توی این گروه بنویسه:\n` +
           `🐱 <b>meow</b>\n` +
@@ -1413,9 +1303,8 @@ async function handleMyChatMember(
           `/pay — انتقال امتیاز\n` +
           `/settings — تنظیمات گروه (ادمین)\n\n` +
           `⏱️ کول‌داون: <b>5 دقیقه</b>\n` +
-          `😸 بفرستید و امتیاز بگیرید!`,
-        parse_mode: "HTML",
-      });
+          `😸 بفرستید و امتیاز بگیرید!`
+      );
     }
   }
 }
@@ -1520,9 +1409,7 @@ app.post("/telegram/webhook", async (c) => {
       if (message.chat.type === "private") {
         const botInfo = await telegramRequest(token, "getMe", {});
         const botUsername = botInfo.result?.username || "YourBot";
-        await telegramRequest(token, "sendMessage", {
-          chat_id: message.chat.id,
-          text: "🐱 میو کردن فقط داخل گروه امتیاز داره! منو رو به گروهت اضافه کن و اونجا میو بگو! 😸",
+        await sendMessage(token, message.chat.id, "🐱 میو کردن فقط داخل گروه امتیاز داره! منو رو به گروهت اضافه کن و اونجا میو بگو! 😸", {
           reply_markup: {
             inline_keyboard: [[{ text: "➕ افزودن به گروه", url: `https://t.me/${botUsername}?startgroup=true` }]],
           },
@@ -1537,23 +1424,10 @@ app.post("/telegram/webhook", async (c) => {
 
       const result = await awardMeow(db, user, message.chat);
 
-      if (result !== null && result < 0) {
-        const remainingSeconds = Math.abs(result);
-        const minutes = Math.floor(remainingSeconds / 60);
-        const seconds = remainingSeconds % 60;
-        let timeText = "";
-        if (minutes > 0) timeText += `${minutes} دقیقه `;
-        if (seconds > 0) timeText += `${seconds} ثانیه`;
-
-        await telegramRequest(token, "sendMessage", {
-          chat_id: message.chat.id,
-          text: `⏱️ صبر کن!\n\n${timeText.trim()} دیگه می‌تونی میو بدی! 😸`,
+      if (result < 0) {
+        await sendMessage(token, message.chat.id, `⏱️ صبر کن!\n\n${formatDuration(-result)} دیگه می‌تونی میو بدی! 😸`, {
           reply_to_message_id: message.message_id,
         });
-        return c.json({ ok: true });
-      }
-
-      if (result === null) {
         return c.json({ ok: true });
       }
 
@@ -1563,10 +1437,7 @@ app.post("/telegram/webhook", async (c) => {
       if (points >= 1000) response = `🌟 <b>MEGA MEOW!!!</b> 🌟\n\n💰 +${points} Meow Points!`;
       else if (points >= 100) response = `🔥 <b>BIG MEOW!</b> 🔥\n\n💰 +${points} Meow Points!`;
 
-      await telegramRequest(token, "sendMessage", {
-        chat_id: message.chat.id,
-        text: response,
-        parse_mode: "HTML",
+      await sendMessage(token, message.chat.id, response, {
         reply_to_message_id: message.message_id,
         reply_markup: postMeowKeyboard(message.chat.id),
       });
@@ -1587,7 +1458,7 @@ app.get("/", (c) => {
   return c.json({
     ok: true,
     bot: "Meow Points",
-    version: "2.1",
+    version: "2.3",
     status: "online",
   });
 });
