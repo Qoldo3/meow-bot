@@ -55,7 +55,14 @@ async function telegramRequest(
     }
   );
 
-  return response.json();
+  const result = await response.json();
+
+  console.log(
+    `Telegram API ${method}:`,
+    JSON.stringify(result)
+  );
+
+  return result;
 }
 
 /* =========================================================
