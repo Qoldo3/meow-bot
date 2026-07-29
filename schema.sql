@@ -10,7 +10,8 @@ CREATE TABLE IF NOT EXISTS users (
     daily_streak INTEGER NOT NULL DEFAULT 0,
     last_daily_at INTEGER,
     last_meow_at INTEGER,
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    is_banned INTEGER DEFAULT 0
 );
 
 -- ============================================
@@ -22,7 +23,8 @@ CREATE TABLE IF NOT EXISTS telegram_groups (
     bot_enabled INTEGER NOT NULL DEFAULT 1,
     cooldown_seconds INTEGER NOT NULL DEFAULT 300,
     created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
+    updated_at INTEGER NOT NULL,
+    is_active INTEGER DEFAULT 1
 );
 
 -- ============================================
