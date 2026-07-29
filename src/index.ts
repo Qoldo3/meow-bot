@@ -11,11 +11,6 @@ type Bindings = {
   WEBHOOK_SECRET: string;
 };
 
-type Context = {
-  env: Bindings;
-  executionCtx?: { waitUntil: (promise: Promise<any>) => void };
-};
-
 type TelegramUser = {
   id: number;
   is_bot?: boolean;
@@ -79,7 +74,7 @@ type DuelState = {
   amount: number;
   groupId: number;
   messageId: number;
-  createdAt: number; // epoch seconds
+  createdAt: number;
 };
 
 const app = new Hono<{ Bindings: Bindings }>();
@@ -213,6 +208,14 @@ function ownerPanelKeyboard() {
         { text: "📢 پیام همگانی", callback_data: "admin:broadcast" },
       ],
       [
+        { text: "👥 گروه‌ها", callback_data: "admin:groups" },
+        { text: "⚔️ دعواها", callback_data: "admin:duels" },
+      ],
+      [
+        { text: "📝 تراکنش‌ها", callback_data: "admin:audit" },
+        { text: "⚙️ تنظیمات", callback_data: "admin:config" },
+      ],
+      [
         { text: "➕ افزودن امتیاز", callback_data: "admin:addpoints" },
         { text: "➖ کسر امتیاز", callback_data: "admin:removepoints" },
       ],
@@ -223,10 +226,6 @@ function ownerPanelKeyboard() {
       [
         { text: "👤 اطلاعات کاربر", callback_data: "admin:userinfo" },
         { text: "🚫 بن/آنبن", callback_data: "admin:banmenu" },
-      ],
-      [
-        { text: "🔍 بررسی دیتابیس", callback_data: "admin:repair" },
-        { text: "⚙️ تنظیمات", callback_data: "admin:config" },
       ],
       [{ text: "🔙 بستن پنل", callback_data: "menu:close" }],
     ],
@@ -256,6 +255,95 @@ function duelKeyboard(duelId: string) {
         { text: "✅ قبول می‌کنم", callback_data: `duel:accept:${duelId}` },
         { text: "❌ نه، مرسی", callback_data: `duel:decline:${duelId}` },
       ],
+    ],
+  };
+}
+
+/* --- NEW OWNER KEYBOARDS --- */
+
+function userActionKeyboard(userId: number) {
+  return {
+    inline_keyboard: [
+      [
+        { text: "➕ +100", callback_data: `useract:add:${userId}:100` },
+        { text: "➕ +500", callback_data: `useract:add:${userId}:500` },
+        { text: "➕ +1000", callback_data: `useract:add:${userId}:1000` },
+      ],
+      [
+        { text: "➖ -100", callback_data: `useract:sub:${userId}:100` },
+        { text: "➖ -500", callback_data: `useract:sub:${userId}:500` },
+        { text: "➖ -1000", callback_data: `useract:sub:${userId}:1000` },
+      ],
+      [
+        { text: "🚫 بن", callback_data: `useract:ban:${userId}:0` },
+        { text: "✅ آنبن", callback_data: `useract:unban:${userId}:0` },
+        { text: "🔄 ریست", callback_data: `useract:reset:${userId}:0` },
+      ],
+      [
+        { text: "📜 تراکنش‌ها", callback_data: `useract:txns:${userId}:0` },
+        { text: "🔙 پنل ادمین", callback_data: "menu:admin" },
+      ],
+    ],
+  };
+}
+
+function broadcastConfirmKeyboard() {
+  return {
+    inline_keyboard: [
+      [
+        { text: "✅ ارسال به همه", callback_data: "bc:confirm" },
+        { text: "❌ لغو", callback_data: "bc:cancel" },
+      ],
+    ],
+  };
+}
+
+function groupManagerKeyboard(page: number) {
+  return {
+    inline_keyboard: [
+      [
+        { text: "⬅️ قبلی", callback_data: `groupmgr:page:${Math.max(0, page - 1)}` },
+        { text: "➡️ بعدی", callback_data: `groupmgr:page:${page + 1}` },
+      ],
+      [{ text: "🔙 پنل ادمین", callback_data: "menu:admin" }],
+    ],
+  };
+}
+
+function configInlineKeyboard(currentDaily: string, currentMega: string, currentBig: string) {
+  const daily = parseInt(currentDaily, 10) || 500;
+  const mega = parseFloat(currentMega) || 0.01;
+  const big = parseFloat(currentBig) || 0.05;
+  return {
+    inline_keyboard: [
+      [
+        { text: "➖", callback_data: `cfg:dec:daily:100` },
+        { text: `💰 Daily: ${daily}`, callback_data: "cfg:noop" },
+        { text: "➕", callback_data: `cfg:inc:daily:100` },
+      ],
+      [
+        { text: "➖", callback_data: `cfg:dec:mega:0.01` },
+        { text: `🌟 Mega: ${mega}`, callback_data: "cfg:noop" },
+        { text: "➕", callback_data: `cfg:inc:mega:0.01` },
+      ],
+      [
+        { text: "➖", callback_data: `cfg:dec:big:0.05` },
+        { text: `🔥 Big: ${big}`, callback_data: "cfg:noop" },
+        { text: "➕", callback_data: `cfg:inc:big:0.05` },
+      ],
+      [{ text: "🔙 پنل ادمین", callback_data: "menu:admin" }],
+    ],
+  };
+}
+
+function txnAuditKeyboard(page: number) {
+  return {
+    inline_keyboard: [
+      [
+        { text: "⬅️ قبلی", callback_data: `audit:page:${Math.max(0, page - 1)}` },
+        { text: "➡️ بعدی", callback_data: `audit:page:${page + 1}` },
+      ],
+      [{ text: "🔙 پنل ادمین", callback_data: "menu:admin" }],
     ],
   };
 }
@@ -402,7 +490,6 @@ async function createDuel(db: D1Database, duel: DuelState): Promise<void> {
 
 async function getDuel(db: D1Database, duelId: string): Promise<DuelState | null> {
   const now = Math.floor(Date.now() / 1000);
-  // Atomic cleanup of expired duels
   await db.prepare(`DELETE FROM active_duels WHERE status = 'pending' AND created_at < ?`).bind(now - DUEL_TIMEOUT_SEC).run();
 
   const row = await db.prepare(`
@@ -470,11 +557,6 @@ function normalizeUsername(raw: string): string {
   return raw.replace(/^@/, "").toLowerCase().trim();
 }
 
-function isValidUsername(raw: string): boolean {
-  const u = normalizeUsername(raw);
-  return u.length >= 1 && u.length <= 32 && /^[a-z0-9_]+$/.test(u);
-}
-
 /* =========================================================
    MEOW DETECTION
 ========================================================= */
@@ -516,11 +598,9 @@ async function awardMeow(
 
   if (isGroup) {
     const settings = await getGroupSettings(db, chat.id);
-    if (!settings.enabled) return 0; // Bot disabled in group
-
+    if (!settings.enabled) return 0;
     await ensureGroup(db, chat);
 
-    // Atomic upsert with cooldown check in WHERE clause
     const result = await db.prepare(`
       INSERT INTO group_members (
         telegram_group_id, telegram_user_id, username, first_name, meow_points, total_meows, last_meow_at
@@ -535,14 +615,12 @@ async function awardMeow(
     `).bind(chat.id, user.id, user.username ?? null, user.first_name, points, now, now - settings.cooldown).run();
 
     if (result.meta.changes === 0) {
-      // Cooldown active — fetch remaining time
       const row = await db.prepare(`SELECT last_meow_at FROM group_members WHERE telegram_group_id = ? AND telegram_user_id = ?`)
         .bind(chat.id, user.id).first<{ last_meow_at: number }>();
       const remaining = row ? Math.max(0, settings.cooldown - (now - row.last_meow_at)) : settings.cooldown;
       return -remaining;
     }
 
-    // Update global stats & transaction (batch for consistency)
     await db.batch([
       db.prepare(`UPDATE users SET meow_points = meow_points + ?, total_meows = total_meows + 1 WHERE telegram_id = ?`).bind(points, user.id),
       db.prepare(`INSERT INTO transactions (telegram_user_id, group_id, amount, reason, created_at) VALUES (?, ?, ?, ?, ?)`)
@@ -551,7 +629,6 @@ async function awardMeow(
 
     return points;
   } else {
-    // Private chat — no cooldown, just award
     await db.batch([
       db.prepare(`UPDATE users SET meow_points = meow_points + ?, total_meows = total_meows + 1 WHERE telegram_id = ?`).bind(points, user.id),
       db.prepare(`INSERT INTO transactions (telegram_user_id, group_id, amount, reason, created_at) VALUES (?, ?, ?, ?, ?)`)
@@ -684,6 +761,10 @@ async function handleDaily(token: string, db: D1Database, message: TelegramMessa
   await sendMessage(token, message.chat.id, `🎁 <b>جایزه روزانه!</b>\n\n💰 +${reward} Meow Points\n🔥 Streak: ${streak} روز`);
 }
 
+/* =========================================================
+   PAY (supports both @username and reply-to)
+========================================================= */
+
 async function handlePay(token: string, db: D1Database, message: TelegramMessage) {
   if (!message.from) return;
   if (message.chat.type === "private") {
@@ -693,40 +774,64 @@ async function handlePay(token: string, db: D1Database, message: TelegramMessage
 
   const text = message.text || "";
   const parts = text.split(/\s+/);
-  if (parts.length < 3) {
-    await sendMessage(token, message.chat.id, "🐱 نحوه استفاده:\n/pay @username 100", { reply_to_message_id: message.message_id });
+
+  let targetUser: { telegram_id: number; first_name: string } | null = null;
+  let amount: number | null = null;
+
+  // Case 1: reply to message + /pay 100
+  if (message.reply_to_message?.from && parts.length === 2) {
+    const replied = message.reply_to_message.from;
+    if (replied.is_bot) {
+      await sendMessage(token, message.chat.id, "🐱 نمی‌تونی به ربات انتقال بدی!", { reply_to_message_id: message.message_id });
+      return;
+    }
+    if (replied.id === message.from.id) {
+      await sendMessage(token, message.chat.id, "🐱 نمی‌تونی به خودت انتقال بدی!", { reply_to_message_id: message.message_id });
+      return;
+    }
+    amount = safeParseAmount(parts[1]);
+    if (amount === null) {
+      await sendMessage(token, message.chat.id, "🐱 مقدار امتیاز نامعتبره!", { reply_to_message_id: message.message_id });
+      return;
+    }
+    await ensureUser(db, replied);
+    targetUser = { telegram_id: replied.id, first_name: replied.first_name };
+  }
+  // Case 2: /pay @username 100
+  else if (parts.length >= 3) {
+    amount = safeParseAmount(parts[2]);
+    if (amount === null) {
+      await sendMessage(token, message.chat.id, "🐱 مقدار امتیاز نامعتبره!", { reply_to_message_id: message.message_id });
+      return;
+    }
+    targetUser = await findUserByUsername(db, normalizeUsername(parts[1]));
+    if (!targetUser) {
+      await sendMessage(token, message.chat.id, "🐱 کاربری با این یوزرنیم پیدا نشد!", { reply_to_message_id: message.message_id });
+      return;
+    }
+    if (targetUser.telegram_id === message.from.id) {
+      await sendMessage(token, message.chat.id, "🐱 نمی‌تونی به خودت انتقال بدی!", { reply_to_message_id: message.message_id });
+      return;
+    }
+  } else {
+    await sendMessage(token, message.chat.id, "🐱 نحوه استفاده:\n/pay @username 100\nیا ریپلای کن و بنویس /pay 100", { reply_to_message_id: message.message_id });
     return;
   }
 
-  const targetUsername = normalizeUsername(parts[1]);
-  const amount = safeParseAmount(parts[2]);
-
-  if (amount === null) {
-    await sendMessage(token, message.chat.id, "🐱 مقدار امتیاز نامعتبره!", { reply_to_message_id: message.message_id });
-    return;
-  }
-
-  const receiver = await findUserByUsername(db, targetUsername);
-  if (!receiver) {
-    await sendMessage(token, message.chat.id, "🐱 کاربری با این یوزرنیم پیدا نشد!", { reply_to_message_id: message.message_id });
-    return;
-  }
-
-  if (receiver.telegram_id === message.from.id) {
-    await sendMessage(token, message.chat.id, "🐱 نمی‌تونی به خودت انتقال بدی!", { reply_to_message_id: message.message_id });
+  if (!targetUser) {
+    await sendMessage(token, message.chat.id, "🐱 کاربر پیدا نشد!", { reply_to_message_id: message.message_id });
     return;
   }
 
   const now = Math.floor(Date.now() / 1000);
 
-  // Atomic transfer via batch
   const batchResults = await db.batch([
     db.prepare(`UPDATE users SET meow_points = meow_points - ? WHERE telegram_id = ? AND meow_points >= ?`).bind(amount, message.from.id, amount),
-    db.prepare(`UPDATE users SET meow_points = meow_points + ? WHERE telegram_id = ?`).bind(amount, receiver.telegram_id),
+    db.prepare(`UPDATE users SET meow_points = meow_points + ? WHERE telegram_id = ?`).bind(amount, targetUser.telegram_id),
     db.prepare(`INSERT INTO transactions (telegram_user_id, group_id, amount, reason, created_at) VALUES (?, ?, ?, ?, ?)`)
-      .bind(message.from.id, message.chat.id, -amount, `PAY_TO_${receiver.telegram_id}`, now),
+      .bind(message.from.id, message.chat.id, -amount, `PAY_TO_${targetUser.telegram_id}`, now),
     db.prepare(`INSERT INTO transactions (telegram_user_id, group_id, amount, reason, created_at) VALUES (?, ?, ?, ?, ?)`)
-      .bind(receiver.telegram_id, message.chat.id, amount, `PAY_FROM_${message.from.id}`, now),
+      .bind(targetUser.telegram_id, message.chat.id, amount, `PAY_FROM_${message.from.id}`, now),
   ]);
 
   if (batchResults[0].meta.changes === 0) {
@@ -737,12 +842,13 @@ async function handlePay(token: string, db: D1Database, message: TelegramMessage
   await sendMessage(
     token,
     message.chat.id,
-    `💸 <b>انتقال موفق!</b>\n\n🐱 ${escapeHtml(message.from.first_name)}\n➡️ ${amount} MP\n🐱 ${escapeHtml(receiver.first_name)}`
+    `💸 <b>انتقال موفق!</b>\n\n🐱 ${escapeHtml(message.from.first_name)}\n➡️ ${amount} MP\n🐱 ${escapeHtml(targetUser.first_name)}`
   );
 }
 
 /* =========================================================
    DUEL SYSTEM (D1-persisted, isolate-safe)
+   NOTE: Only challenger balance is checked on creation.
 ========================================================= */
 
 function generateDuelId(): string {
@@ -848,20 +954,9 @@ async function handleDuelRequest(
     return;
   }
 
+  // NOTE: We do NOT check target balance here. Only challenger needs enough points.
   await ensureUser(db, target);
-  const targetUser = await db
-    .prepare(`SELECT meow_points FROM users WHERE telegram_id = ?`)
-    .bind(target.id)
-    .first<{ meow_points: number }>();
 
-  if (!targetUser || targetUser.meow_points < amount) {
-    await sendMessage(token, message.chat.id, `🐱 ${escapeHtml(target.first_name)} امتیاز کافی نداره!`, {
-      reply_to_message_id: message.message_id,
-    });
-    return;
-  }
-
-  // Close any existing open duel against this target in this group
   const existingId = await findOpenDuelAgainst(db, message.chat.id, target.id);
   if (existingId) await deleteDuel(db, existingId);
 
@@ -927,8 +1022,9 @@ async function handleDuelAccept(
 
   await deleteDuel(db, duelId);
 
-  // Atomic balance check & deduction via batch
   const now = Math.floor(Date.now() / 1000);
+
+  // Atomic deduction from BOTH players. If either lacks funds, duel cancels.
   const batchResults = await db.batch([
     db.prepare(`UPDATE users SET meow_points = meow_points - ? WHERE telegram_id = ? AND meow_points >= ?`)
       .bind(duel.amount, duel.challengerId, duel.amount),
@@ -951,7 +1047,6 @@ async function handleDuelAccept(
   const targetRoll = Math.floor(Math.random() * 100) + 1;
 
   if (challengerRoll === targetRoll) {
-    // Return bets atomically
     await db.batch([
       db.prepare(`UPDATE users SET meow_points = meow_points + ? WHERE telegram_id = ?`).bind(duel.amount, duel.challengerId),
       db.prepare(`UPDATE users SET meow_points = meow_points + ? WHERE telegram_id = ?`).bind(duel.amount, duel.targetId),
@@ -974,10 +1069,8 @@ async function handleDuelAccept(
   const winnerName = challengerRoll > targetRoll ? duel.challengerName : duel.targetName;
   const pot = duel.amount * 2;
 
-  // Award winner
   await db.prepare(`UPDATE users SET meow_points = meow_points + ? WHERE telegram_id = ?`).bind(pot, winnerId).run();
 
-  // Group stats & transactions (batch)
   await db.batch([
     db.prepare(`INSERT INTO transactions (telegram_user_id, group_id, amount, reason, created_at) VALUES (?, ?, ?, ?, ?)`)
       .bind(duel.challengerId, duel.groupId, -duel.amount, `DUEL_BET`, now),
@@ -1125,7 +1218,6 @@ async function handleCallbackQuery(
   const userId = callback.from.id;
   const data = callback.data;
 
-  // Validate callback data format to prevent crashes
   const segments = data.split(":");
   if (segments.length < 2) {
     await answerCallback(token, callback.id, "❌ درخواست نامعتبر", true);
@@ -1188,6 +1280,11 @@ async function handleCallbackQuery(
         );
       } else if (params[0] === "close") {
         await deleteMessage(token, chatId, messageId);
+      } else if (params[0] === "admin") {
+        const fakeMessage: TelegramMessage = {
+          message_id: messageId, from: callback.from, chat: callback.message.chat, text: "/admin",
+        };
+        await handleAdmin(token, env, fakeMessage);
       }
       await answerCallback(token, callback.id);
       return;
@@ -1255,8 +1352,179 @@ async function handleCallbackQuery(
       } else if (params[0] === "repair") {
         await editMessageText(token, chatId, messageId, `🔍 <b>بررسی دیتابیس</b>\n\nاستفاده:\n<code>/repair</code>`, ownerPanelKeyboard());
       } else if (params[0] === "config") {
-        await editMessageText(token, chatId, messageId, `⚙️ <b>تنظیمات ربات</b>\n\nاستفاده:\n<code>/config daily_reward 500</code>\n<code>/config mega_chance 0.01</code>\n<code>/config big_chance 0.05</code>`, ownerPanelKeyboard());
+        const currentDaily = await getBotSetting(db, "daily_reward") ?? "500";
+        const currentMega = await getBotSetting(db, "mega_chance") ?? "0.01";
+        const currentBig = await getBotSetting(db, "big_chance") ?? "0.05";
+        await editMessageText(token, chatId, messageId, "⚙️ <b>تنظیمات ربات</b>\n\nاز دکمه‌ها استفاده کن:", configInlineKeyboard(currentDaily, currentMega, currentBig));
+      } else if (params[0] === "groups") {
+        const fakeMessage: TelegramMessage = { message_id: messageId, from: callback.from, chat: callback.message.chat, text: "/groups" };
+        await handleGroups(token, db, env, fakeMessage, 0);
+      } else if (params[0] === "duels") {
+        const fakeMessage: TelegramMessage = { message_id: messageId, from: callback.from, chat: callback.message.chat, text: "/duels" };
+        await handleDuels(token, db, env, fakeMessage);
+      } else if (params[0] === "audit") {
+        const fakeMessage: TelegramMessage = { message_id: messageId, from: callback.from, chat: callback.message.chat, text: "/audit" };
+        await handleAudit(token, db, env, fakeMessage, 0);
       }
+      await answerCallback(token, callback.id);
+      return;
+    }
+
+    /* --- NEW INLINE CALLBACKS --- */
+
+    if (action === "useract") {
+      const targetUserId = parseInt(params[2], 10);
+      const amount = parseInt(params[3], 10) || 0;
+      const now = Math.floor(Date.now() / 1000);
+
+      if (params[1] === "add") {
+        await db.prepare(`UPDATE users SET meow_points = meow_points + ? WHERE telegram_id = ?`).bind(amount, targetUserId).run();
+        await db.prepare(`INSERT INTO transactions (telegram_user_id, amount, reason, created_at) VALUES (?, ?, ?, ?)`)
+          .bind(targetUserId, amount, "OWNER_INLINE_ADD", now).run();
+        await answerCallback(token, callback.id, `✅ +${amount} MP`, true);
+      } else if (params[1] === "sub") {
+        await db.prepare(`UPDATE users SET meow_points = MAX(0, meow_points - ?) WHERE telegram_id = ?`).bind(amount, targetUserId).run();
+        await db.prepare(`INSERT INTO transactions (telegram_user_id, amount, reason, created_at) VALUES (?, ?, ?, ?)`)
+          .bind(targetUserId, -amount, "OWNER_INLINE_SUB", now).run();
+        await answerCallback(token, callback.id, `✅ -${amount} MP`, true);
+      } else if (params[1] === "ban") {
+        await db.prepare(`UPDATE users SET is_banned = 1 WHERE telegram_id = ?`).bind(targetUserId).run();
+        await answerCallback(token, callback.id, "🚫 کاربر بن شد!", true);
+      } else if (params[1] === "unban") {
+        await db.prepare(`UPDATE users SET is_banned = 0 WHERE telegram_id = ?`).bind(targetUserId).run();
+        await answerCallback(token, callback.id, "✅ کاربر آنبن شد!", true);
+      } else if (params[1] === "reset") {
+        await db.prepare(`UPDATE users SET meow_points = 0, total_meows = 0, daily_streak = 0, last_daily_at = NULL WHERE telegram_id = ?`).bind(targetUserId).run();
+        await db.prepare(`DELETE FROM group_members WHERE telegram_user_id = ?`).bind(targetUserId).run();
+        await db.prepare(`DELETE FROM transactions WHERE telegram_user_id = ?`).bind(targetUserId).run();
+        await answerCallback(token, callback.id, "🔄 کاربر ریست شد!", true);
+      } else if (params[1] === "txns") {
+        const txns = await getUserTransactions(db, targetUserId, 10);
+        let text = `📜 <b>تراکنش‌های کاربر</b>\n\n`;
+        for (const t of txns.results) {
+          const sign = t.amount >= 0 ? "+" : "";
+          text += `${sign}${t.amount} — ${t.reason} (${new Date(t.created_at * 1000).toLocaleDateString("fa-IR")})\n`;
+        }
+        await sendMessage(token, chatId, text || "تراکنشی یافت نشد.");
+        await answerCallback(token, callback.id);
+        return;
+      }
+
+      // Refresh user info panel
+      const user = await findUserById(db, targetUserId);
+      if (user) {
+        const rank = await getGlobalRank(db, user.telegram_id);
+        const text =
+          `👤 <b>${escapeHtml(user.first_name)}</b>\n\n` +
+          `🆔 <code>${user.telegram_id}</code>\n` +
+          `💰 ${user.meow_points} MP | 🏆 #${rank}\n` +
+          `🐾 ${user.total_meows} | 🔥 ${user.daily_streak} روز`;
+        await editMessageText(token, chatId, messageId, text, userActionKeyboard(targetUserId));
+      }
+      return;
+    }
+
+    if (action === "bc") {
+      if (params[0] === "confirm") {
+        await handleBroadcastConfirm(token, db, env, callback);
+      } else if (params[0] === "cancel") {
+        broadcastDrafts.delete(callback.from.id);
+        await editMessageText(token, chatId, messageId, "❌ ارسال لغو شد.", ownerPanelKeyboard());
+        await answerCallback(token, callback.id, "لغو شد.");
+      }
+      return;
+    }
+
+    if (action === "groupmgr") {
+      const targetGroupId = parseInt(params[1], 10);
+      const currentPage = parseInt(params[2], 10) || 0;
+      const now = Math.floor(Date.now() / 1000);
+
+      if (params[0] === "page") {
+        const fakeMessage: TelegramMessage = { message_id: messageId, from: callback.from, chat: callback.message.chat, text: "/groups" };
+        await handleGroups(token, db, env, fakeMessage, targetGroupId);
+        await answerCallback(token, callback.id);
+        return;
+      }
+
+      if (params[0] === "toggle") {
+        const g = await db.prepare(`SELECT is_active, title FROM telegram_groups WHERE telegram_group_id = ?`).bind(targetGroupId).first<{ is_active: number; title: string }>();
+        const newState = g?.is_active ? 0 : 1;
+        await db.prepare(`UPDATE telegram_groups SET is_active = ?, updated_at = ? WHERE telegram_group_id = ?`).bind(newState, now, targetGroupId).run();
+        await answerCallback(token, callback.id, newState ? "✅ گروه فعال شد" : "🚫 گروه غیرفعال شد", true);
+      } else if (params[0] === "reset") {
+        await db.prepare(`DELETE FROM group_members WHERE telegram_group_id = ?`).bind(targetGroupId).run();
+        await answerCallback(token, callback.id, "🔄 لیدربورد ریست شد!", true);
+      } else if (params[0] === "stats") {
+        const stats = await db.prepare(`SELECT COUNT(*) as c, SUM(meow_points) as p FROM group_members WHERE telegram_group_id = ?`).bind(targetGroupId).first<{ c: number; p: number }>();
+        await sendMessage(token, chatId, `📊 آمار گروه ${targetGroupId}:\n👥 ${stats?.c ?? 0} عضو\n💰 ${stats?.p ?? 0} MP کل`);
+        await answerCallback(token, callback.id);
+        return;
+      } else if (params[0] === "members") {
+        const members = await db.prepare(`SELECT first_name, meow_points FROM group_members WHERE telegram_group_id = ? ORDER BY meow_points DESC LIMIT 10`).bind(targetGroupId).all<{ first_name: string; meow_points: number }>();
+        const list = members.results.map((m, i) => `${i + 1}. ${escapeHtml(m.first_name)} — ${m.meow_points} MP`).join("\n");
+        await sendMessage(token, chatId, `👥 <b>اعضای گروه</b>\n\n${list || "هیچ عضوی یافت نشد."}`);
+        await answerCallback(token, callback.id);
+        return;
+      }
+
+      const fakeMessage: TelegramMessage = { message_id: messageId, from: callback.from, chat: callback.message.chat, text: "/groups" };
+      await handleGroups(token, db, env, fakeMessage, currentPage);
+      return;
+    }
+
+    if (action === "cfg") {
+      if (params[0] === "noop") {
+        await answerCallback(token, callback.id);
+        return;
+      }
+      const keyMap: Record<string, string> = { daily: "daily_reward", mega: "mega_chance", big: "big_chance" };
+      const key = keyMap[params[1]];
+      if (!key) { await answerCallback(token, callback.id); return; }
+
+      const current = await getBotSetting(db, key) ?? (key === "daily_reward" ? "500" : key === "mega_chance" ? "0.01" : "0.05");
+      const delta = parseFloat(params[2]);
+      let newVal: string;
+
+      if (key === "daily_reward") {
+        newVal = String(Math.max(0, parseInt(current, 10) + (params[0] === "inc" ? delta : -delta)));
+      } else {
+        newVal = String(Math.max(0, Math.min(1, parseFloat(current) + (params[0] === "inc" ? delta : -delta))));
+      }
+
+      await setBotSetting(db, key, newVal);
+      const updatedDaily = await getBotSetting(db, "daily_reward") ?? "500";
+      const updatedMega = await getBotSetting(db, "mega_chance") ?? "0.01";
+      const updatedBig = await getBotSetting(db, "big_chance") ?? "0.05";
+
+      await editMessageText(token, chatId, messageId, "⚙️ <b>تنظیمات ربات</b>\n\nاز دکمه‌ها استفاده کن:", configInlineKeyboard(updatedDaily, updatedMega, updatedBig));
+      await answerCallback(token, callback.id, `✅ ${key} = ${newVal}`);
+      return;
+    }
+
+    if (action === "duelmon") {
+      if (params[0] === "cancel" && isValidDuelId(params[1])) {
+        const duel = await getDuel(db, params[1]);
+        if (duel) {
+          await deleteDuel(db, params[1]);
+          await telegramRequest(token, "editMessageText", {
+            chat_id: duel.groupId,
+            message_id: duel.messageId,
+            text: `❌ <b>دعوا توسط ادمین لغو شد!</b>\n\n🐱 ${escapeHtml(duel.challengerName)} 🆚 ${escapeHtml(duel.targetName)}`,
+            parse_mode: "HTML",
+          });
+        }
+        await answerCallback(token, callback.id, "✅ دعوا لغو شد.", true);
+        const fakeMessage: TelegramMessage = { message_id: messageId, from: callback.from, chat: callback.message.chat, text: "/duels" };
+        await handleDuels(token, db, env, fakeMessage);
+      }
+      return;
+    }
+
+    if (action === "audit") {
+      const targetPage = parseInt(params[1], 10) || 0;
+      const fakeMessage: TelegramMessage = { message_id: messageId, from: callback.from, chat: callback.message.chat, text: "/audit" };
+      await handleAudit(token, db, env, fakeMessage, targetPage);
       await answerCallback(token, callback.id);
       return;
     }
@@ -1269,16 +1537,41 @@ async function handleCallbackQuery(
 }
 
 /* =========================================================
-   OWNER COMMANDS (text-based for precision)
+   OWNER COMMANDS (text-based + new inline features)
 ========================================================= */
+
+const broadcastDrafts = new Map<number, string>();
 
 async function handleOwnerBroadcast(token: string, db: D1Database, env: Bindings, message: TelegramMessage) {
   if (!message.from || !isOwner(env, message.from.id)) return;
   const text = (message.text || "").replace(/^\/broadcast\s*/, "");
   if (!text) {
-    await sendMessage(token, message.chat.id, "🐱 نحوه استفاده: /broadcast پیام");
+    await sendMessage(token, message.chat.id, "🐱 نحوه استفاده: /broadcast پیام شما");
     return;
   }
+
+  broadcastDrafts.set(message.from.id, text);
+
+  await sendMessage(token, message.chat.id,
+    `📢 <b>پیش‌نمایش پیام همگانی:</b>\n\n${escapeHtml(text)}\n\nآماده ارسال به همه کاربران؟`,
+    { reply_markup: broadcastConfirmKeyboard() }
+  );
+}
+
+async function handleBroadcastConfirm(token: string, db: D1Database, env: Bindings, callback: TelegramCallbackQuery) {
+  if (!callback.from || !isOwner(env, callback.from.id)) {
+    await answerCallback(token, callback.id, "🚫 فقط ادمین!", true);
+    return;
+  }
+
+  const draft = broadcastDrafts.get(callback.from.id);
+  if (!draft) {
+    await answerCallback(token, callback.id, "❌ پیش‌نمایش منقضی شده!", true);
+    return;
+  }
+
+  broadcastDrafts.delete(callback.from.id);
+  await answerCallback(token, callback.id, "📢 در حال ارسال...");
 
   let sent = 0;
   let failed = 0;
@@ -1294,7 +1587,7 @@ async function handleOwnerBroadcast(token: string, db: D1Database, env: Bindings
     for (const u of users.results) {
       const res = await telegramRequest(token, "sendMessage", {
         chat_id: u.telegram_id,
-        text: `📢 <b>پیام از طرف ادمین</b>\n\n${escapeHtml(text)}`,
+        text: `📢 <b>پیام از طرف ادمین</b>\n\n${escapeHtml(draft)}`,
         parse_mode: "HTML",
       });
       if (res.ok) sent++;
@@ -1302,11 +1595,13 @@ async function handleOwnerBroadcast(token: string, db: D1Database, env: Bindings
       lastId = u.telegram_id;
     }
 
-    // Rate limit: ~25 msg/sec
     await new Promise(r => setTimeout(r, Math.ceil(users.results.length / 25) * 1000));
   }
 
-  await sendMessage(token, message.chat.id, `📢 ارسال شد!\n\n✅ موفق: ${sent}\n❌ ناموفق: ${failed}`);
+  await editMessageText(token, callback.message!.chat.id, callback.message!.message_id,
+    `📢 <b>ارسال تکمیل شد!</b>\n\n✅ موفق: ${sent}\n❌ ناموفق: ${failed}`,
+    ownerPanelKeyboard()
+  );
 }
 
 async function handleOwnerAddPoints(token: string, db: D1Database, env: Bindings, message: TelegramMessage) {
@@ -1384,10 +1679,6 @@ async function handleOwnerResetUser(token: string, db: D1Database, env: Bindings
   await sendMessage(token, message.chat.id, `🔄 کاربر ${escapeHtml(user.first_name)} کاملاً ریست شد!`);
 }
 
-/* =========================================================
-   NEW OWNER COMMANDS: userinfo, ban, unban, repair, config
-========================================================= */
-
 async function handleOwnerUserInfo(token: string, db: D1Database, env: Bindings, message: TelegramMessage) {
   if (!message.from || !isOwner(env, message.from.id)) return;
   const parts = (message.text || "").split(/\s+/);
@@ -1450,7 +1741,7 @@ async function handleOwnerUserInfo(token: string, db: D1Database, env: Bindings,
     }
   }
 
-  await sendMessage(token, message.chat.id, text);
+  await sendMessage(token, message.chat.id, text, { reply_markup: userActionKeyboard(user.telegram_id) });
 }
 
 async function handleOwnerBanUser(token: string, db: D1Database, env: Bindings, message: TelegramMessage) {
@@ -1494,7 +1785,6 @@ async function handleOwnerRepair(token: string, db: D1Database, env: Bindings, m
 
   const issues: string[] = [];
 
-  // Fix negative points
   const negativeUsers = await db.prepare(`SELECT telegram_id, first_name, meow_points FROM users WHERE meow_points < 0`).all<{ telegram_id: number; first_name: string; meow_points: number }>();
   if (negativeUsers.results.length) {
     for (const u of negativeUsers.results) {
@@ -1503,7 +1793,6 @@ async function handleOwnerRepair(token: string, db: D1Database, env: Bindings, m
     issues.push(`❌ ${negativeUsers.results.length} کاربر امتیاز منفی داشتن → 0 شد`);
   }
 
-  // Fix orphaned group_members
   const orphaned = await db.prepare(`
     SELECT gm.telegram_group_id FROM group_members gm
     LEFT JOIN telegram_groups g ON g.telegram_group_id = gm.telegram_group_id
@@ -1517,7 +1806,6 @@ async function handleOwnerRepair(token: string, db: D1Database, env: Bindings, m
     issues.push(`🗑️ ${groupIds.length} گروه یتیمانه پاک شدن`);
   }
 
-  // Optimized mismatch check: single query instead of N+1
   const mismatched = await db.prepare(`
     SELECT u.telegram_id, u.first_name, u.meow_points, COALESCE(SUM(t.amount), 0) as expected
     FROM users u
@@ -1528,10 +1816,6 @@ async function handleOwnerRepair(token: string, db: D1Database, env: Bindings, m
 
   if (mismatched.results.length > 0) {
     issues.push(`⚠️ ${mismatched.results.length} کاربر تفاوت امتیاز/تراکنش دارن`);
-    // Optionally auto-fix:
-    // for (const u of mismatched.results) {
-    //   await db.prepare(`UPDATE users SET meow_points = ? WHERE telegram_id = ?`).bind(u.expected, u.telegram_id).run();
-    // }
   }
 
   if (issues.length === 0) {
@@ -1563,6 +1847,124 @@ async function handleOwnerConfig(token: string, db: D1Database, env: Bindings, m
 
   await setBotSetting(db, key, value);
   await sendMessage(token, message.chat.id, `✅ ${key} = ${value} تنظیم شد.`);
+}
+
+/* =========================================================
+   NEW OWNER COMMANDS: /groups, /duels, /audit
+========================================================= */
+
+async function handleGroups(token: string, db: D1Database, env: Bindings, message: TelegramMessage, page = 0) {
+  if (!message.from || !isOwner(env, message.from.id)) return;
+  const perPage = 5;
+  const offset = page * perPage;
+
+  const groups = await db.prepare(`
+    SELECT telegram_group_id, title, is_active,
+      (SELECT COUNT(*) FROM group_members WHERE telegram_group_id = g.telegram_group_id) as member_count
+    FROM telegram_groups g
+    ORDER BY updated_at DESC
+    LIMIT ? OFFSET ?
+  `).bind(perPage + 1, offset).all<{ telegram_group_id: number; title: string; is_active: number; member_count: number }>();
+
+  if (!groups.results.length) {
+    await sendMessage(token, message.chat.id, "🐱 هیچ گروهی پیدا نشد!", { reply_markup: ownerPanelKeyboard() });
+    return;
+  }
+
+  const hasMore = groups.results.length > perPage;
+  const rows = hasMore ? groups.results.slice(0, perPage) : groups.results;
+
+  let text = `📋 <b>گروه‌ها</b> (صفحه ${page + 1})\n\n`;
+  for (const g of rows) {
+    const status = g.is_active ? "✅" : "🚫";
+    text += `${status} <b>${escapeHtml(g.title || "Unknown")}</b>\n`;
+    text += `   👥 ${g.member_count} عضو | ID: <code>${g.telegram_group_id}</code>\n\n`;
+  }
+
+  const keyboard: any[] = [];
+  for (const g of rows) {
+    keyboard.push([
+      { text: `📊 ${escapeHtml(g.title || "Group").slice(0, 15)}`, callback_data: `groupmgr:stats:${g.telegram_group_id}:${page}` },
+      { text: g.is_active ? "🚫" : "✅", callback_data: `groupmgr:toggle:${g.telegram_group_id}:${page}` },
+      { text: "🔄", callback_data: `groupmgr:reset:${g.telegram_group_id}:${page}` },
+    ]);
+  }
+  keyboard.push([
+    { text: "⬅️ قبلی", callback_data: `groupmgr:page:${Math.max(0, page - 1)}` },
+    { text: "➡️ بعدی", callback_data: `groupmgr:page:${hasMore ? page + 1 : page}` },
+  ]);
+  keyboard.push([{ text: "🔙 پنل ادمین", callback_data: "menu:admin" }]);
+
+  await sendMessage(token, message.chat.id, text, { reply_markup: { inline_keyboard: keyboard } });
+}
+
+async function handleDuels(token: string, db: D1Database, env: Bindings, message: TelegramMessage) {
+  if (!message.from || !isOwner(env, message.from.id)) return;
+  const now = Math.floor(Date.now() / 1000);
+
+  const duels = await db.prepare(`
+    SELECT duel_id, challenger_name, target_name, amount, group_id, created_at
+    FROM active_duels
+    WHERE status = 'pending' AND created_at >= ?
+    ORDER BY created_at DESC
+    LIMIT 10
+  `).bind(now - DUEL_TIMEOUT_SEC).all<{
+    duel_id: string; challenger_name: string; target_name: string;
+    amount: number; group_id: number; created_at: number;
+  }>();
+
+  if (!duels.results.length) {
+    await sendMessage(token, message.chat.id, "✅ هیچ دعوای فعالی نیست!", { reply_markup: ownerPanelKeyboard() });
+    return;
+  }
+
+  let text = `⚔️ <b>دعواهای فعال</b> (${duels.results.length})\n\n`;
+  const keyboard: any[] = [];
+
+  for (const d of duels.results) {
+    const remaining = Math.max(0, DUEL_TIMEOUT_SEC - (now - d.created_at));
+    text += `🐱 ${escapeHtml(d.challenger_name)} 🆚 ${escapeHtml(d.target_name)}\n`;
+    text += `   💰 ${d.amount} MP | ⏱️ ${remaining}s | Group: ${d.group_id}\n\n`;
+    keyboard.push([{ text: `❌ لغو: ${escapeHtml(d.challenger_name).slice(0, 10)} vs ${escapeHtml(d.target_name).slice(0, 10)}`, callback_data: `duelmon:cancel:${d.duel_id}` }]);
+  }
+
+  keyboard.push([{ text: "🔙 پنل ادمین", callback_data: "menu:admin" }]);
+
+  await sendMessage(token, message.chat.id, text, { reply_markup: { inline_keyboard: keyboard } });
+}
+
+async function handleAudit(token: string, db: D1Database, env: Bindings, message: TelegramMessage, page = 0) {
+  if (!message.from || !isOwner(env, message.from.id)) return;
+  const perPage = 10;
+  const offset = page * perPage;
+
+  const txns = await db.prepare(`
+    SELECT t.amount, t.reason, t.created_at, u.first_name, u.telegram_id
+    FROM transactions t
+    JOIN users u ON u.telegram_id = t.telegram_user_id
+    ORDER BY t.created_at DESC
+    LIMIT ? OFFSET ?
+  `).bind(perPage + 1, offset).all<{
+    amount: number; reason: string; created_at: number;
+    first_name: string; telegram_id: number;
+  }>();
+
+  if (!txns.results.length) {
+    await sendMessage(token, message.chat.id, "🐱 هیچ تراکنشی ثبت نشده!", { reply_markup: ownerPanelKeyboard() });
+    return;
+  }
+
+  const hasMore = txns.results.length > perPage;
+  const rows = hasMore ? txns.results.slice(0, perPage) : txns.results;
+
+  let text = `📝 <b>آخرین تراکنش‌ها</b> (صفحه ${page + 1})\n\n`;
+  for (const t of rows) {
+    const sign = t.amount >= 0 ? "+" : "";
+    const time = new Date(t.created_at * 1000).toLocaleTimeString("fa-IR", { hour: "2-digit", minute: "2-digit" });
+    text += `${sign}${t.amount} <code>${t.reason}</code> — ${escapeHtml(t.first_name)} (${time})\n`;
+  }
+
+  await sendMessage(token, message.chat.id, text, { reply_markup: txnAuditKeyboard(hasMore ? page : page - 1) });
 }
 
 /* =========================================================
@@ -1602,7 +2004,6 @@ function toEnglishNumbers(str: string): string {
 async function handleMyChatMember(token: string, db: D1Database, update: TelegramChatMemberUpdated) {
   const { chat, new_chat_member } = update;
 
-  // Bot was added to group (my_chat_member is always about this bot)
   if (new_chat_member.status === "member") {
     if (chat.type === "group" || chat.type === "supergroup") {
       await ensureGroup(db, chat);
@@ -1630,7 +2031,6 @@ async function handleMyChatMember(token: string, db: D1Database, update: Telegra
     }
   }
 
-  // Bot was removed from group
   if (new_chat_member.status === "left" || new_chat_member.status === "kicked") {
     if (chat.type === "group" || chat.type === "supergroup") {
       await deactivateGroup(db, chat.id);
@@ -1669,7 +2069,6 @@ app.post("/telegram/webhook", async (c) => {
     const user = message.from;
     if (!user || user.is_bot) return c.json({ ok: true });
 
-    // Check if user is globally banned
     if (await isUserBanned(db, user.id)) {
       return c.json({ ok: true });
     }
@@ -1753,6 +2152,18 @@ app.post("/telegram/webhook", async (c) => {
       await handlePay(token, db, message);
       return c.json({ ok: true });
     }
+    if (command === "/groups") {
+      await handleGroups(token, db, c.env, message, 0);
+      return c.json({ ok: true });
+    }
+    if (command === "/duels") {
+      await handleDuels(token, db, c.env, message);
+      return c.json({ ok: true });
+    }
+    if (command === "/audit") {
+      await handleAudit(token, db, c.env, message, 0);
+      return c.json({ ok: true });
+    }
     if (command === "دعوا") {
       await handleDuelRequest(token, db, message, c);
       return c.json({ ok: true });
@@ -1786,7 +2197,6 @@ app.post("/telegram/webhook", async (c) => {
       }
 
       if (result === 0) {
-        // Bot disabled or other non-error zero case
         return c.json({ ok: true });
       }
 
@@ -1817,7 +2227,7 @@ app.get("/", (c) => {
   return c.json({
     ok: true,
     bot: "Meow Points",
-    version: "2.5-prod",
+    version: "2.6-prod",
     status: "online",
   });
 });

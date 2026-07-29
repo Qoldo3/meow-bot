@@ -1,7 +1,3 @@
--- ============================================
--- PRODUCTION FIXES — Run this migration before deploying
--- ============================================
-
 -- 1. Persist duels to D1 (CRITICAL: in-memory Map breaks on Workers)
 CREATE TABLE IF NOT EXISTS active_duels (
     duel_id TEXT PRIMARY KEY,
