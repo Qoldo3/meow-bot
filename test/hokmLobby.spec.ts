@@ -4,6 +4,8 @@ import {
   cancelHokmGame,
   createHokmGame,
   addHokmPlayer,
+  removeHokmPlayer,
+  refundHokmEscrow,
   getHokmGame,
   getHokmPlayers,
   getActiveHokmGame,
@@ -14,7 +16,7 @@ interface Stmt {
   bindArgs: unknown[];
 }
 
-function makeDb(overrides: { game?: unknown; players?: unknown[] } = {}) {
+function makeDb(overrides: { game?: unknown; players?: unknown[]; addPlayerBlocked?: boolean } = {}) {
   const game = overrides.game !== undefined ? overrides.game : {
     game_id: "game1",
     group_id: 10,
@@ -52,7 +54,8 @@ function makeDb(overrides: { game?: unknown; players?: unknown[] } = {}) {
         stmt.all = async () => ({ results: sql.includes("FROM hokm_game_players") ? players : [] });
         stmt.run = async () => {
           statements.push(stmt);
-          return { meta: { changes: 1 } };
+          const blocked = overrides.addPlayerBlocked && sql.includes("INSERT INTO hokm_game_players");
+          return { meta: { changes: blocked ? 0 : 1 } };
         };
         return stmt;
       },
@@ -133,6 +136,50 @@ describe("getActiveHokmGame", () => {
     const { db } = makeDb({ game: null });
     const game = await getActiveHokmGame(db, 10);
     expect(game).toBeNull();
+  });
+});
+
+describe("addHokmPlayer seat guard", () => {
+  it("returns false when the seat is already taken", async () => {
+    const { db } = makeDb({ addPlayerBlocked: true });
+    const added = await addHokmPlayer(db, "game1", {
+      userId: 999,
+      username: null,
+      firstName: "Z",
+      seat: 3,
+      acceptedAt: 1,
+    });
+    expect(added).toBe(false);
+  });
+
+  it("returns true when the seat is free", async () => {
+    const { db } = makeDb();
+    const added = await addHokmPlayer(db, "game1", {
+      userId: 999,
+      username: null,
+      firstName: "Z",
+      seat: 3,
+      acceptedAt: 1,
+    });
+    expect(added).toBe(true);
+  });
+});
+
+describe("removeHokmPlayer / refundHokmEscrow", () => {
+  it("issues a delete for the player row", async () => {
+    const { db, statements } = makeDb();
+    await removeHokmPlayer(db, "game1", 999);
+    expect(statements.some((s) => s.sql.includes("DELETE FROM hokm_game_players"))).toBe(true);
+  });
+
+  it("refunds user + group balances and logs a transaction", async () => {
+    const { db, statements } = makeDb();
+    await refundHokmEscrow(db, 10, 999, 1000);
+    const userUpdate = statements.find((s) => s.sql.includes("UPDATE users SET meow_points = meow_points + ?"));
+    expect(userUpdate?.bindArgs[0]).toBe(1000);
+    expect(statements.some((s) => s.sql.includes("UPDATE group_members") && s.bindArgs[0] === 1000)).toBe(true);
+    const txn = statements.find((s) => s.sql.includes("INSERT INTO transactions"));
+    expect(txn?.bindArgs[3]).toBe("HOKM_REFUND");
   });
 });
 

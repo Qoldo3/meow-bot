@@ -1,3 +1,9 @@
+/** Minimal shape of the Hono context used by request handlers. */
+export type RequestContext = {
+  req: { url: string };
+  executionCtx?: { waitUntil(promise: Promise<unknown>): void };
+};
+
 export type Bindings = {
   DB: D1Database;
   TELEGRAM_BOT_TOKEN: string;
@@ -8,9 +14,9 @@ export type Bindings = {
   HOKM_APP_URL?: string;
   MEOW_VIP_USER_ID?: string;
   HOKM_JOIN_TIMEOUT_SEC?: number;
+  HOKM_LOBBY_TIMEOUT_SEC?: number;
   HOKM_TURN_TIMEOUT_SEC?: number;
   HOKM_TRUMP_TIMEOUT_SEC?: number;
-  HOKM_RECONNECT_GRACE_SEC?: number;
   HOKM_AFK_STRIKES?: number;
 };
 

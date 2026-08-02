@@ -1,5 +1,5 @@
 -- ============================================
--- Consolidated schema (source of truth: migrations/0000..0008)
+-- Consolidated schema (source of truth: migrations/0000..0009)
 -- ============================================
 
 -- ============================================

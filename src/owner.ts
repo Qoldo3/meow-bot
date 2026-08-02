@@ -27,6 +27,7 @@ import {
   getDuel,
   deleteDuel,
 } from "./duel";
+import { getActiveHokmGame, cancelHokmGame } from "./hokmLobby";
 import {
   escapeHtml,
   safeParseAmount,
@@ -568,6 +569,40 @@ export async function handleDuels(token: string, db: D1Database, env: Bindings, 
   await sendMessage(token, message.chat.id, text, { reply_markup: { inline_keyboard: keyboard } });
 }
 
+export async function handleHokmCancel(token: string, db: D1Database, env: Bindings, message: TelegramMessage) {
+  if (!(await requireOwner(token, env, message))) return;
+  if (message.chat.type === "private") {
+    await sendMessage(token, message.chat.id, "🐱 این دستور فقط داخل گروه کار می‌کنه!");
+    return;
+  }
+
+  const active = await getActiveHokmGame(db, message.chat.id);
+  if (!active) {
+    await sendMessage(token, message.chat.id, "🐱 هیچ بازی حکم فعالی در این گروه نیست.");
+    return;
+  }
+
+  // Refund every paid player via the DB (idempotent), then tell the game
+  // engine to stop so clients get the cancelled state.
+  await cancelHokmGame(db, active.game_id);
+  try {
+    const stub = env.HOKM_GAME.get(env.HOKM_GAME.idFromName(active.game_id));
+    await stub.fetch("http://hokm/cancel", { method: "POST" });
+  } catch (e) {
+    console.error("HokmGame cancel error:", e);
+  }
+
+  if (active.board_msg_id) {
+    await editMessageText(
+      token,
+      message.chat.id,
+      active.board_msg_id,
+      `❌ <b>بازی حکم لغو شد</b>\n\n🚫 توسط صاحب ربات لغو شد. مبلغ‌ها به بازیکن‌ها برگشت.`
+    );
+  }
+  await sendMessage(token, message.chat.id, "❌ بازی حکم لغو شد و مبلغ‌ها برگشت.");
+}
+
 export async function handleAudit(token: string, db: D1Database, env: Bindings, message: TelegramMessage, page = 0) {
   if (!(await requireOwner(token, env, message))) return;
   const perPage = 10;
@@ -804,4 +839,7 @@ export const OWNER_COMMANDS: Record<string, (token: string, db: D1Database, env:
   "/groups": handleGroups,
   "/duels": handleDuels,
   "/audit": handleAudit,
+  "/hokmcancel": handleHokmCancel,
 };
+
+

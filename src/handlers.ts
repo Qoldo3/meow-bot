@@ -74,6 +74,8 @@ import {
   getHokmGame,
   getActiveHokmGame,
   addHokmPlayer,
+  removeHokmPlayer,
+  refundHokmEscrow,
   getHokmPlayers,
   setHokmGameBoardMsg,
   setHokmGamePlaying,
@@ -85,6 +87,7 @@ import { handleAdmin, handleOwnerPanelAction } from "./owner";
 import {
   Bindings,
   DuelState,
+  RequestContext,
   TelegramCallbackQuery,
   TelegramMessage,
   TelegramChat,
@@ -1233,7 +1236,7 @@ export async function handleDuelRequest(
   token: string,
   db: D1Database,
   message: TelegramMessage,
-  c: any
+  c: RequestContext
 ) {
   if (!message.from) return;
   if (message.chat.type === "private") {
@@ -1589,6 +1592,7 @@ export async function handleHokmRequest(
   const gameId = generateHokmId();
   const nowSec = Math.floor(Date.now() / 1000);
   const appUrl = env.HOKM_APP_URL || (c?.req?.url ? new URL(c.req.url).origin : "");
+  const lobbyTimeout = env.HOKM_LOBBY_TIMEOUT_SEC ?? HOKM_LOBBY_TIMEOUT_SEC;
 
   const res = await sendMessage(
     token,
@@ -1598,7 +1602,7 @@ export async function handleHokmRequest(
       `💰 پات: <b>${bet} MP</b>\n` +
       `💸 سهم هر نفر: <b>${perPlayer} MP</b>\n` +
       `👥 تیم‌ها: صندلی‌های روبه‌رو هم‌تیم هستند\n\n` +
-      `⏱️ ${HOKM_LOBBY_TIMEOUT_SEC} ثانیه فرصت داری ۳ نفر دیگه جذب کنی!`,
+      `⏱️ ${lobbyTimeout} ثانیه فرصت داری ۳ نفر دیگه جذب کنی!`,
     { reply_markup: hokmSeatKeyboard(gameId) }
   );
   const msgId = res.result?.message_id ?? 0;
@@ -1628,26 +1632,48 @@ export async function handleHokmRequest(
   const escrow = await db.batch([
     db.prepare(`UPDATE users SET meow_points = meow_points - ? WHERE telegram_id = ? AND meow_points >= ?`).bind(perPlayer, message.from.id, perPlayer),
     db.prepare(`UPDATE group_members SET meow_points = meow_points - ? WHERE telegram_group_id = ? AND telegram_user_id = ? AND meow_points >= ?`).bind(perPlayer, message.chat.id, message.from.id, perPlayer),
-    db.prepare(`INSERT INTO transactions (telegram_user_id, group_id, amount, reason, created_at) VALUES (?, ?, ?, ?, ?)`).bind(message.from.id, message.chat.id, -perPlayer, `HOKM_BET`, nowSec),
   ]);
-  if (escrow[0].meta.changes === 0 || escrow[1].meta.changes === 0) {
+  const usersDeducted = escrow[0].meta.changes > 0;
+  const groupDeducted = escrow[1].meta.changes > 0;
+  if (!usersDeducted || !groupDeducted) {
+    // Reverse whatever part of the escrow succeeded so balances stay consistent.
+    const undo: D1PreparedStatement[] = [];
+    if (usersDeducted) {
+      undo.push(db.prepare(`UPDATE users SET meow_points = meow_points + ? WHERE telegram_id = ?`).bind(perPlayer, message.from.id));
+    }
+    if (groupDeducted) {
+      undo.push(db.prepare(`UPDATE group_members SET meow_points = meow_points + ? WHERE telegram_group_id = ? AND telegram_user_id = ?`).bind(perPlayer, message.chat.id, message.from.id));
+    }
+    if (undo.length) await db.batch(undo);
     await cancelHokmGame(db, gameId);
     await deleteMessage(token, message.chat.id, msgId);
+    await sendMessage(token, message.chat.id, "🐱 امتیاز کافی برای شروع بازی نداشتی!");
     return;
   }
 
-  await addHokmPlayer(db, gameId, {
+  const added = await addHokmPlayer(db, gameId, {
     userId: message.from.id,
     username: message.from.username ?? null,
     firstName: message.from.first_name,
     seat: 0,
     acceptedAt: nowSec,
   });
+  if (!added) {
+    await refundHokmEscrow(db, message.chat.id, message.from.id, perPlayer);
+    await cancelHokmGame(db, gameId);
+    await deleteMessage(token, message.chat.id, msgId);
+    return;
+  }
 
-  await scheduleHokmLobbyTimeout(c, token, db, gameId);
+  await db
+    .prepare(`INSERT INTO transactions (telegram_user_id, group_id, amount, reason, created_at) VALUES (?, ?, ?, ?, ?)`)
+    .bind(message.from.id, message.chat.id, -perPlayer, `HOKM_BET`, nowSec)
+    .run();
+
+  await scheduleHokmLobbyTimeout(c, token, db, gameId, lobbyTimeout);
 }
 
-async function scheduleHokmLobbyTimeout(c: any, token: string, db: D1Database, gameId: string) {
+async function scheduleHokmLobbyTimeout(c: RequestContext, token: string, db: D1Database, gameId: string, timeoutSec: number) {
   const timeoutPromise = new Promise<void>((resolve) => {
     setTimeout(async () => {
       try {
@@ -1664,7 +1690,7 @@ async function scheduleHokmLobbyTimeout(c: any, token: string, db: D1Database, g
         console.error("Hokm lobby timeout error:", e);
       }
       resolve();
-    }, HOKM_LOBBY_TIMEOUT_SEC * 1000);
+    }, timeoutSec * 1000);
   });
 
   if (c?.executionCtx?.waitUntil) {
@@ -1724,20 +1750,41 @@ export async function handleHokmAccept(
   const escrow = await db.batch([
     db.prepare(`UPDATE users SET meow_points = meow_points - ? WHERE telegram_id = ? AND meow_points >= ?`).bind(game.per_player, callback.from.id, game.per_player),
     db.prepare(`UPDATE group_members SET meow_points = meow_points - ? WHERE telegram_group_id = ? AND telegram_user_id = ? AND meow_points >= ?`).bind(game.per_player, game.group_id, callback.from.id, game.per_player),
-    db.prepare(`INSERT INTO transactions (telegram_user_id, group_id, amount, reason, created_at) VALUES (?, ?, ?, ?, ?)`).bind(callback.from.id, game.group_id, -game.per_player, `HOKM_BET`, nowSec),
   ]);
-  if (escrow[0].meta.changes === 0 || escrow[1].meta.changes === 0) {
+  const usersDeducted = escrow[0].meta.changes > 0;
+  const groupDeducted = escrow[1].meta.changes > 0;
+  if (!usersDeducted || !groupDeducted) {
+    // Reverse whatever part of the escrow succeeded so balances stay consistent.
+    const undo: D1PreparedStatement[] = [];
+    if (usersDeducted) {
+      undo.push(db.prepare(`UPDATE users SET meow_points = meow_points + ? WHERE telegram_id = ?`).bind(game.per_player, callback.from.id));
+    }
+    if (groupDeducted) {
+      undo.push(db.prepare(`UPDATE group_members SET meow_points = meow_points + ? WHERE telegram_group_id = ? AND telegram_user_id = ?`).bind(game.per_player, game.group_id, callback.from.id));
+    }
+    if (undo.length) await db.batch(undo);
     await answerCallback(token, callback.id, "🐱 امتیاز کافی نداری!", true);
     return;
   }
 
-  await addHokmPlayer(db, gameId, {
+  // Reserve the seat atomically — concurrent taps cannot both win the same seat.
+  const added = await addHokmPlayer(db, gameId, {
     userId: callback.from.id,
     username: callback.from.username ?? null,
     firstName: callback.from.first_name,
     seat,
     acceptedAt: nowSec,
   });
+  if (!added) {
+    await refundHokmEscrow(db, game.group_id, callback.from.id, game.per_player);
+    await answerCallback(token, callback.id, "🐱 این صندلی گرفته شده یا بازی شروع شده!", true);
+    return;
+  }
+
+  await db
+    .prepare(`INSERT INTO transactions (telegram_user_id, group_id, amount, reason, created_at) VALUES (?, ?, ?, ?, ?)`)
+    .bind(callback.from.id, game.group_id, -game.per_player, `HOKM_BET`, nowSec)
+    .run();
 
   const allPlayers = await getHokmPlayers(db, gameId);
   const newCount = allPlayers.length;
@@ -1761,6 +1808,10 @@ export async function handleHokmAccept(
   // already done so; only the winner of the race runs the start flow.
   const started = await setHokmGamePlaying(db, gameId, nowSec);
   if (!started) {
+    // Defensive: another concurrent joiner already started the match. Undo our
+    // own escrow and seat reservation so no money or player row is leaked.
+    await removeHokmPlayer(db, gameId, callback.from.id);
+    await refundHokmEscrow(db, game.group_id, callback.from.id, game.per_player);
     if (game.board_msg_id) {
       await deleteMessage(token, game.group_id, game.board_msg_id);
     }
@@ -1769,6 +1820,7 @@ export async function handleHokmAccept(
   }
 
   const baseUrl = game.app_url || env.HOKM_APP_URL || "";
+  const boardMarkup = baseUrl ? { reply_markup: hokmBoardKeyboard(gameId, baseUrl) } : {};
   const boardRes = await sendMessage(
     token,
     game.group_id,
@@ -1776,7 +1828,7 @@ export async function handleHokmAccept(
       `💰 پات: <b>${game.bet} MP</b>\n` +
       `🏆 برنده تیم: ${game.bet} MP\n\n` +
       `⬇️ دکمه بازی رو بزن تا وارد بشی!`,
-    { reply_markup: hokmBoardKeyboard(gameId, baseUrl) }
+    boardMarkup
   );
   const boardMsgId = boardRes.result?.message_id ?? 0;
   if (!boardMsgId) {

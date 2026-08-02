@@ -11,7 +11,7 @@ A Telegram points/gamification bot running on **Cloudflare Workers** (Hono + D1 
 - 🏦 Group treasury + tax pools, 👥 clans
 - 🎉 Configurable bonus events (`/add event Name Multiplier Minutes`)
 - ♠️ **Hokm 2v2**: Telegram lobby → WebApp (WebSocket) → Durable Object game engine with alarms for turn/trump/draw timeouts
-- 🔒 Owner panel (`/admin`) with broadcast, user management, DB repair and audit
+- 🔒 Owner panel (`/admin`) with broadcast, user management, DB repair, audit, and `/hokmcancel` to cancel an active Hokm game (refunds everyone)
 
 ## Stack
 

@@ -99,7 +99,7 @@ No new money tables.
    set status `cancelled`.
 5. On the 3rd accept (4 players, seats fixed, creator at seat 0) → status `playing`,
    `started_at`, **create the DO**, post the board message with 4 `web_app` buttons:
-   `{ text: "♠️ باز کردن بازی", web_app: { url: `${HOKM_APP_URL}/hokm/${gameId}` } }`.
+   `{ text: "♠️ باز کردن بازی", web_app: { url: `${HOKM_APP_URL}/hokm.html?game=${gameId}` } }`.
 6. Pre-match no-show: DO sets alarm `HOKM_JOIN_TIMEOUT_SEC = 300`. If any seat never connects
    → cancel + refund all four (nobody loses points pre-match). The **leaver rule (#5) applies
    only after the match starts.**

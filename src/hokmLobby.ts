@@ -86,18 +86,56 @@ export async function getActiveHokmGame(db: D1Database, groupId: number): Promis
   return row ?? null;
 }
 
+/**
+ * Atomically reserves a seat. Returns false when the seat is already taken,
+ * the user already joined, or the game is no longer in lobby. The guarded
+ * single-statement INSERT is race-free — concurrent accepts cannot both take
+ * the same seat.
+ */
 export async function addHokmPlayer(
   db: D1Database,
   gameId: string,
   player: { userId: number; username: string | null; firstName: string; seat: number; acceptedAt: number }
-): Promise<void> {
-  await db
+): Promise<boolean> {
+  const res = await db
     .prepare(
       `INSERT INTO hokm_game_players (game_id, telegram_user_id, seat, team, username, first_name, paid, accepted_at)
-       VALUES (?, ?, ?, ?, ?, ?, 1, ?)`
+       SELECT ?, ?, ?, ?, ?, ?, 1, ?
+       WHERE NOT EXISTS (SELECT 1 FROM hokm_game_players WHERE game_id = ? AND seat = ?)
+         AND NOT EXISTS (SELECT 1 FROM hokm_game_players WHERE game_id = ? AND telegram_user_id = ?)
+         AND (SELECT status FROM hokm_games WHERE game_id = ?) = 'lobby'`
     )
-    .bind(gameId, player.userId, player.seat, player.seat % 2, player.username, player.firstName, player.acceptedAt)
+    .bind(
+      gameId, player.userId, player.seat, player.seat % 2, player.username, player.firstName, player.acceptedAt,
+      gameId, player.seat,
+      gameId, player.userId,
+      gameId
+    )
     .run();
+  return res.meta.changes > 0;
+}
+
+export async function removeHokmPlayer(db: D1Database, gameId: string, userId: number): Promise<void> {
+  await db.prepare(`DELETE FROM hokm_game_players WHERE game_id = ? AND telegram_user_id = ?`).bind(gameId, userId).run();
+}
+
+/** Reverses a Hokm escrow (full refund to user + group balances with a ledger row). */
+export async function refundHokmEscrow(
+  db: D1Database,
+  groupId: number,
+  userId: number,
+  amount: number,
+  reason = "HOKM_REFUND"
+): Promise<void> {
+  await db.batch([
+    db.prepare(`UPDATE users SET meow_points = meow_points + ? WHERE telegram_id = ?`).bind(amount, userId),
+    db
+      .prepare(`UPDATE group_members SET meow_points = meow_points + ? WHERE telegram_group_id = ? AND telegram_user_id = ?`)
+      .bind(amount, groupId, userId),
+    db
+      .prepare(`INSERT INTO transactions (telegram_user_id, group_id, amount, reason, created_at) VALUES (?, ?, ?, ?, ?)`)
+      .bind(userId, groupId, amount, reason, Math.floor(Date.now() / 1000)),
+  ]);
 }
 
 export async function getHokmPlayers(db: D1Database, gameId: string): Promise<HokmPlayerRow[]> {

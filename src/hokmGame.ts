@@ -144,6 +144,11 @@ export class HokmGame {
         await this.persist();
         return new Response("ok");
       }
+      if (url.pathname === "/cancel") {
+        // Called by the bot owner via /hokmcancel (worker already refunded via D1).
+        await this.cancelByOwner();
+        return new Response("cancelled");
+      }
       return new Response("hokm do", { status: 200 });
     }
 
@@ -152,7 +157,10 @@ export class HokmGame {
     }
 
     const headerAppUrl = request.headers.get("X-Hokm-App-Url");
-    if (headerAppUrl) this.g.appUrl = headerAppUrl;
+    if (headerAppUrl && this.g.appUrl !== headerAppUrl) {
+      this.g.appUrl = headerAppUrl;
+      await this.persist();
+    }
 
     const userIdStr = request.headers.get("X-Hokm-User-Id");
     const name = request.headers.get("X-Hokm-Name") ?? "";
@@ -601,6 +609,22 @@ export class HokmGame {
       state: this.publicState(),
     });
     this.broadcast({ type: "notice", text: "⏱️ همه بازیکن‌ها وارد نشدند — بازی لغو شد و مبلغ‌ها برگشت." });
+    // Keep the Telegram board in sync with the cancelled state.
+    await this.editBoard();
+  }
+
+  /** Cancels an in-progress game (owner command). DB refunds are done by the worker. */
+  private async cancelByOwner(): Promise<void> {
+    const g = this.g;
+    if (!g || g.phase === "match_over" || g.phase === "cancelled") return;
+    g.phase = "cancelled";
+    g.result = "cancelled";
+    g.winnerTeam = null;
+    g.turnDeadline = null;
+    await this.state.storage.deleteAlarm();
+    await this.persist();
+    this.broadcast({ type: "state", state: this.publicState() });
+    this.broadcast({ type: "notice", text: "🚫 بازی توسط ادمین لغو شد — مبلغ‌ها برگشت." });
   }
 
   private boardText(): string {

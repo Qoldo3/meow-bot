@@ -1,4 +1,4 @@
-import { DuelState } from "./types";
+import { DuelState, RequestContext } from "./types";
 import { DUEL_TIMEOUT_SEC } from "./constants";
 import { telegramRequest } from "./telegram";
 import { escapeHtml } from "./utils";
@@ -65,7 +65,7 @@ export async function findOpenDuelAgainst(db: D1Database, groupId: number, targe
 }
 
 export async function scheduleDuelTimeout(
-  c: any,
+  c: RequestContext,
   token: string,
   db: D1Database,
   duelId: string
