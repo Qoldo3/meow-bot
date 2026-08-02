@@ -1,0 +1,53 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "meow-bot",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-03-10",
+
+  "durable_objects": {
+    "bindings": [
+      { "name": "HOKM_GAME", "class_name": "HokmGame" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["HokmGame"] }
+  ],
+
+  "assets": {
+    "directory": "./public",
+    "not_found_handling": "single-page-application"
+  },
+
+  // Runs every minute to clean up expired duels and Hokm lobbies.
+  // This is the reliable backstop for the in-request setTimeout() paths.
+  "triggers": {
+    "crons": ["* * * * *"]
+  },
+
+  "vars": {
+    // Public URL of the deployed worker (used for the Hokm WebApp button).
+    // Leave unset to auto-derive it from the incoming request origin.
+    // "HOKM_APP_URL": "https://meow-bot.<your-subdomain>.workers.dev",
+    // Optional: a user id that gets boosted meow tier chances (leave empty to disable).
+    "MEOW_VIP_USER_ID": "",
+    "HOKM_JOIN_TIMEOUT_SEC": 300,
+    "HOKM_TURN_TIMEOUT_SEC": 60,
+    "HOKM_TRUMP_TIMEOUT_SEC": 30,
+    "HOKM_RECONNECT_GRACE_SEC": 90,
+    "HOKM_AFK_STRIKES": 2
+  },
+
+  // Optional: enables the 30s active-event cache (see getActiveEvent in handlers.ts).
+  // Create a KV namespace and uncomment:
+  // "kv_namespaces": [
+  //   { "binding": "CACHE", "id": "<kv-namespace-id>" }
+  // ],
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "meow-bot-db",
+      "database_id": "9c2f5180-7d44-4446-9a31-ff37d73e4b0e"
+    }
+  ]
+}

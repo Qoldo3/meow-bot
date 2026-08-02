@@ -1,0 +1,12 @@
+# Copy this file to .dev.vars and fill in real values.
+# .dev.vars is used by `wrangler dev` for local development and is gitignored.
+
+# Telegram bot token from @BotFather
+TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
+
+# The numeric Telegram user id of the bot owner (admin commands)
+BOT_OWNER_ID=123456789
+
+# Arbitrary secret used to secure the webhook (must match the secret_token
+# passed to setWebhook)
+WEBHOOK_SECRET=change-me-to-a-long-random-string

@@ -1,0 +1,241 @@
+-- ============================================
+-- Consolidated schema (source of truth: migrations/0000..0008)
+-- ============================================
+
+-- ============================================
+-- USERS (global player data)
+-- ============================================
+CREATE TABLE IF NOT EXISTS users (
+    telegram_id INTEGER PRIMARY KEY,
+    username TEXT,
+    first_name TEXT NOT NULL,
+    meow_points INTEGER NOT NULL DEFAULT 0,
+    total_meows INTEGER NOT NULL DEFAULT 0,
+    daily_streak INTEGER NOT NULL DEFAULT 0,
+    last_daily_at INTEGER,
+    last_meow_at INTEGER,
+    created_at INTEGER NOT NULL,
+    is_banned INTEGER DEFAULT 0,
+    duel_rating INTEGER NOT NULL DEFAULT 1000
+);
+
+-- ============================================
+-- TELEGRAM GROUPS
+-- ============================================
+CREATE TABLE IF NOT EXISTS telegram_groups (
+    telegram_group_id INTEGER PRIMARY KEY,
+    title TEXT,
+    bot_enabled INTEGER NOT NULL DEFAULT 1,
+    cooldown_seconds INTEGER NOT NULL DEFAULT 300,
+    meow_tax_pool INTEGER NOT NULL DEFAULT 0,
+    duel_tax_pool INTEGER NOT NULL DEFAULT 0,
+    lottery_ticket_price INTEGER NOT NULL DEFAULT 100,
+    lottery_pot INTEGER NOT NULL DEFAULT 0,
+    lottery_ticket_sales INTEGER NOT NULL DEFAULT 0,
+    treasury_balance INTEGER NOT NULL DEFAULT 0,
+    lottery_enabled INTEGER NOT NULL DEFAULT 1,
+    lottery_tax_percentage INTEGER NOT NULL DEFAULT 75,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    is_active INTEGER DEFAULT 1
+);
+
+-- ============================================
+-- GROUP MEMBERS (per-group stats with name caching)
+-- ============================================
+CREATE TABLE IF NOT EXISTS group_members (
+    telegram_group_id INTEGER NOT NULL,
+    telegram_user_id INTEGER NOT NULL,
+    username TEXT,
+    first_name TEXT,
+    meow_points INTEGER NOT NULL DEFAULT 0,
+    total_meows INTEGER NOT NULL DEFAULT 0,
+    last_meow_at INTEGER,
+    last_dice_at INTEGER,
+    lottery_bonus_tickets INTEGER NOT NULL DEFAULT 0,
+    lottery_meow_credit INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (telegram_group_id, telegram_user_id)
+);
+
+-- ============================================
+-- TRANSACTIONS
+-- ============================================
+CREATE TABLE IF NOT EXISTS transactions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    telegram_user_id INTEGER NOT NULL,
+    group_id INTEGER,
+    amount INTEGER NOT NULL,
+    reason TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+
+-- ============================================
+-- BOT SETTINGS (maintenance mode, config, etc.)
+-- ============================================
+CREATE TABLE IF NOT EXISTS bot_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+-- ============================================
+-- ACTIVE DUELS (persisted so duels survive restarts)
+-- ============================================
+CREATE TABLE IF NOT EXISTS active_duels (
+    duel_id TEXT PRIMARY KEY,
+    challenger_id INTEGER NOT NULL,
+    challenger_name TEXT NOT NULL,
+    target_id INTEGER NOT NULL,
+    target_name TEXT NOT NULL,
+    amount INTEGER NOT NULL,
+    group_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending'
+);
+
+-- ============================================
+-- EVENTS (bonus multiplier periods)
+-- ============================================
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL,
+    start_at INTEGER NOT NULL,
+    end_at INTEGER NOT NULL,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    bonus_multiplier INTEGER NOT NULL DEFAULT 1,
+    created_at INTEGER NOT NULL
+);
+
+-- ============================================
+-- GROUP TREASURY (audit/ledger)
+-- ============================================
+CREATE TABLE IF NOT EXISTS group_treasury_transactions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    telegram_group_id INTEGER NOT NULL,
+    telegram_user_id INTEGER,
+    amount INTEGER NOT NULL,
+    balance_before INTEGER,
+    balance_after INTEGER,
+    reference_type TEXT,
+    reference_id TEXT,
+    reason TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+
+-- ============================================
+-- LOTTERY
+-- ============================================
+CREATE TABLE IF NOT EXISTS lottery_rounds (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    telegram_group_id INTEGER NOT NULL,
+    round_number INTEGER NOT NULL,
+    ticket_price INTEGER NOT NULL,
+    tax_percentage INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open', -- open, drawn, cancelled
+    winning_numbers TEXT,
+    started_at INTEGER NOT NULL,
+    drawn_at INTEGER,
+    created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS lottery_tickets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    lottery_round_id INTEGER NOT NULL,
+    telegram_group_id INTEGER NOT NULL,
+    telegram_user_id INTEGER NOT NULL,
+    numbers TEXT NOT NULL,
+    amount_paid INTEGER NOT NULL,
+    purchased_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS lottery_payouts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    lottery_round_id INTEGER NOT NULL,
+    lottery_ticket_id INTEGER,
+    telegram_group_id INTEGER NOT NULL,
+    telegram_user_id INTEGER NOT NULL,
+    match_count INTEGER NOT NULL,
+    tier_pct INTEGER NOT NULL,
+    payout INTEGER NOT NULL,
+    created_at INTEGER NOT NULL
+);
+
+-- ============================================
+-- CLANS
+-- ============================================
+CREATE TABLE IF NOT EXISTS group_clans (
+    clan_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    telegram_group_id INTEGER NOT NULL,
+    name TEXT NOT NULL COLLATE NOCASE,
+    owner_user_id INTEGER NOT NULL,
+    treasury_balance INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    UNIQUE(telegram_group_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS clan_members (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    clan_id INTEGER NOT NULL,
+    telegram_user_id INTEGER NOT NULL,
+    role TEXT NOT NULL DEFAULT 'member',
+    joined_at INTEGER NOT NULL,
+    UNIQUE(clan_id, telegram_user_id)
+);
+
+-- ============================================
+-- INDEXES FOR PERFORMANCE
+-- ============================================
+CREATE INDEX IF NOT EXISTS idx_users_points ON users(meow_points DESC);
+CREATE INDEX IF NOT EXISTS idx_users_duel_rating ON users(duel_rating DESC);
+CREATE INDEX IF NOT EXISTS idx_group_members_points ON group_members(telegram_group_id, meow_points DESC);
+CREATE INDEX IF NOT EXISTS idx_transactions_user ON transactions(telegram_user_id);
+CREATE INDEX IF NOT EXISTS idx_transactions_user_amount ON transactions(telegram_user_id, amount);
+CREATE INDEX IF NOT EXISTS idx_active_duels_target ON active_duels(group_id, target_id, status);
+CREATE INDEX IF NOT EXISTS idx_active_duels_created ON active_duels(created_at);
+CREATE INDEX IF NOT EXISTS idx_events_active ON events(is_active, start_at, end_at);
+CREATE INDEX IF NOT EXISTS idx_treasury_transactions_group ON group_treasury_transactions(telegram_group_id);
+CREATE INDEX IF NOT EXISTS idx_treasury_transactions_group_created ON group_treasury_transactions(telegram_group_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_treasury_transactions_reference ON group_treasury_transactions(reference_type, reference_id);
+CREATE INDEX IF NOT EXISTS idx_lottery_rounds_group_status ON lottery_rounds(telegram_group_id, status);
+CREATE INDEX IF NOT EXISTS idx_lottery_tickets_round_user ON lottery_tickets(lottery_round_id, telegram_user_id);
+CREATE INDEX IF NOT EXISTS idx_lottery_payouts_round ON lottery_payouts(lottery_round_id);
+CREATE INDEX IF NOT EXISTS idx_clan_members_clan_user ON clan_members(clan_id, telegram_user_id);
+CREATE INDEX IF NOT EXISTS idx_group_clans_group ON group_clans(telegram_group_id);
+
+-- ============================================
+-- HOKM (حکم) 2v2 card game
+-- ============================================
+CREATE TABLE IF NOT EXISTS hokm_games (
+  game_id        TEXT PRIMARY KEY,
+  group_id       INTEGER NOT NULL,
+  creator_id     INTEGER NOT NULL,
+  bet            INTEGER NOT NULL,
+  per_player     INTEGER NOT NULL,
+  status         TEXT NOT NULL DEFAULT 'lobby',
+  board_msg_id   INTEGER,
+  app_url        TEXT,
+  winner_team    INTEGER,
+  result         TEXT,
+  created_at     INTEGER NOT NULL,
+  started_at     INTEGER,
+  ended_at       INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS hokm_game_players (
+  game_id          TEXT NOT NULL,
+  telegram_user_id INTEGER NOT NULL,
+  seat             INTEGER NOT NULL,
+  team             INTEGER NOT NULL,
+  username         TEXT,
+  first_name       TEXT NOT NULL,
+  paid             INTEGER NOT NULL DEFAULT 0,
+  accepted_at      INTEGER NOT NULL,
+  PRIMARY KEY (game_id, telegram_user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_hokm_games_group_status ON hokm_games(group_id, status);
+CREATE INDEX IF NOT EXISTS idx_hokm_players_game ON hokm_game_players(game_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_hokm_games_one_active_per_group
+  ON hokm_games(group_id)
+  WHERE status IN ('lobby', 'playing');

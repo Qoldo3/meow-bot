@@ -1,0 +1,1 @@
+ALTER TABLE group_members ADD COLUMN last_dice_at INTEGER;
