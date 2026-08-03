@@ -3,6 +3,7 @@ import {
   answerCallback,
   editMessageText,
   telegramRequest,
+  isGroupAdmin,
 } from "./telegram";
 import {
   ownerPanelKeyboard,
@@ -569,17 +570,27 @@ export async function handleDuels(token: string, db: D1Database, env: Bindings, 
   await sendMessage(token, message.chat.id, text, { reply_markup: { inline_keyboard: keyboard } });
 }
 
-export async function handleHokmCancel(token: string, db: D1Database, env: Bindings, message: TelegramMessage) {
-  if (!(await requireOwner(token, env, message))) return;
-  if (message.chat.type === "private") {
-    await sendMessage(token, message.chat.id, "🐱 این دستور فقط داخل گروه کار می‌کنه!");
-    return;
+/**
+ * Cancels the active Hokm game in a group — refunds paid players via D1,
+ * tells the game engine to stop (clients get the cancelled state), and edits
+ * the board. Callable by the bot owner, a group admin, or the game creator.
+ */
+export async function cancelActiveHokmGame(
+  token: string,
+  db: D1Database,
+  env: Bindings,
+  chatId: number,
+  actorId: number
+): Promise<{ ok: boolean; message: string }> {
+  const active = await getActiveHokmGame(db, chatId);
+  if (!active) {
+    return { ok: false, message: "🐱 هیچ بازی حکم فعالی در این گروه نیست." };
   }
 
-  const active = await getActiveHokmGame(db, message.chat.id);
-  if (!active) {
-    await sendMessage(token, message.chat.id, "🐱 هیچ بازی حکم فعالی در این گروه نیست.");
-    return;
+  const admin = await isGroupAdmin(token, chatId, actorId);
+  const creator = active.creator_id === actorId;
+  if (!isOwner(env, actorId) && !admin && !creator) {
+    return { ok: false, message: "🚫 فقط صاحب ربات، ادمین گروه یا سازندهٔ بازی می‌تونه بازی رو لغو کنه." };
   }
 
   // Refund every paid player via the DB (idempotent), then tell the game
@@ -587,7 +598,10 @@ export async function handleHokmCancel(token: string, db: D1Database, env: Bindi
   await cancelHokmGame(db, active.game_id);
   try {
     const stub = env.HOKM_GAME.get(env.HOKM_GAME.idFromName(active.game_id));
-    await stub.fetch("http://hokm/cancel", { method: "POST" });
+    await stub.fetch("http://hokm/cancel", {
+      method: "POST",
+      headers: { "X-Hokm-Game-Id": active.game_id },
+    });
   } catch (e) {
     console.error("HokmGame cancel error:", e);
   }
@@ -595,12 +609,25 @@ export async function handleHokmCancel(token: string, db: D1Database, env: Bindi
   if (active.board_msg_id) {
     await editMessageText(
       token,
-      message.chat.id,
+      chatId,
       active.board_msg_id,
-      `❌ <b>بازی حکم لغو شد</b>\n\n🚫 توسط صاحب ربات لغو شد. مبلغ‌ها به بازیکن‌ها برگشت.`
+      `❌ <b>بازی حکم لغو شد</b>
+
+🚫 مبلغ‌ها به بازیکن‌ها برگشت.`
     );
   }
-  await sendMessage(token, message.chat.id, "❌ بازی حکم لغو شد و مبلغ‌ها برگشت.");
+  return { ok: true, message: "❌ بازی حکم لغو شد و مبلغ‌ها برگشت." };
+}
+
+export async function handleHokmCancel(token: string, db: D1Database, env: Bindings, message: TelegramMessage) {
+  if (message.chat.type === "private") {
+    await sendMessage(token, message.chat.id, "🐱 این دستور فقط داخل گروه کار می‌کنه!");
+    return;
+  }
+  const actorId = message.from?.id;
+  if (!actorId) return;
+  const res = await cancelActiveHokmGame(token, db, env, message.chat.id, actorId);
+  await sendMessage(token, message.chat.id, res.message);
 }
 
 export async function handleAudit(token: string, db: D1Database, env: Bindings, message: TelegramMessage, page = 0) {

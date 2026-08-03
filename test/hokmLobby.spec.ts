@@ -9,6 +9,8 @@ import {
   getHokmGame,
   getHokmPlayers,
   getActiveHokmGame,
+  hokmBotUserId,
+  isHokmBotUserId,
 } from "../src/hokmLobby";
 
 interface Stmt {
@@ -209,5 +211,69 @@ describe("createHokmGame / addHokmPlayer", () => {
     expect(players).toHaveLength(4);
     expect(statements.some((s) => s.sql.includes("INSERT INTO hokm_games"))).toBe(true);
     expect(statements.some((s) => s.sql.includes("INSERT INTO hokm_game_players"))).toBe(true);
+  });
+});
+
+
+describe("AI bot players (paid=0)", () => {
+  it("hokmBotUserId produces stable negative ids recognized by isHokmBotUserId", () => {
+    expect(hokmBotUserId(1)).toBe(-1001);
+    expect(hokmBotUserId(2)).toBe(-1002);
+    expect(hokmBotUserId(3)).toBe(-1003);
+    expect(isHokmBotUserId(-1003)).toBe(true);
+    expect(isHokmBotUserId(12345)).toBe(false);
+  });
+
+  it("addHokmPlayer persists paid=0 for bot seats", async () => {
+    const { db, statements } = makeDb();
+    const added = await addHokmPlayer(db, "game1", {
+      userId: hokmBotUserId(1),
+      username: null,
+      firstName: "Bot 1",
+      seat: 1,
+      acceptedAt: 1,
+      paid: 0,
+    });
+    expect(added).toBe(true);
+    const insert = statements.find((s) => s.sql.includes("INSERT INTO hokm_game_players"));
+    expect(insert).toBeDefined();
+    // bind order: gameId, userId, seat, team, username, firstName, paid, acceptedAt
+    expect(insert!.bindArgs[6]).toBe(0);
+  });
+
+  it("cancelHokmGame refunds only paid players (bots get nothing)", async () => {
+    const { db, statements } = makeDb({
+      players: [
+        { game_id: "game1", telegram_user_id: 100, seat: 0, team: 0, username: null, first_name: "A", paid: 1, accepted_at: 1 },
+        { game_id: "game1", telegram_user_id: -1001, seat: 1, team: 1, username: null, first_name: "Bot 1", paid: 0, accepted_at: 1 },
+        { game_id: "game1", telegram_user_id: -1002, seat: 2, team: 0, username: null, first_name: "Bot 2", paid: 0, accepted_at: 1 },
+        { game_id: "game1", telegram_user_id: -1003, seat: 3, team: 1, username: null, first_name: "Bot 3", paid: 0, accepted_at: 1 },
+      ],
+    });
+    await cancelHokmGame(db, "game1");
+    const refunds = statements.filter(
+      (s) => s.sql.includes("INSERT INTO transactions") && s.bindArgs.includes("HOKM_REFUND")
+    );
+    expect(refunds).toHaveLength(1);
+    expect(refunds[0].bindArgs[0]).toBe(100); // only the human is refunded
+    expect(refunds[0].bindArgs[2]).toBe(1000);
+  });
+
+  it("settleHokmMatch pays only paid winners", async () => {
+    const { db, statements } = makeDb({
+      players: [
+        { game_id: "game1", telegram_user_id: 100, seat: 0, team: 0, username: null, first_name: "A", paid: 1, accepted_at: 1 },
+        { game_id: "game1", telegram_user_id: -1001, seat: 1, team: 1, username: null, first_name: "Bot 1", paid: 0, accepted_at: 1 },
+        { game_id: "game1", telegram_user_id: -1002, seat: 2, team: 0, username: null, first_name: "Bot 2", paid: 0, accepted_at: 1 },
+        { game_id: "game1", telegram_user_id: -1003, seat: 3, team: 1, username: null, first_name: "Bot 3", paid: 0, accepted_at: 1 },
+      ],
+    });
+    await settleHokmMatch(db, "game1", 0, "match");
+    const wins = statements.filter(
+      (s) => s.sql.includes("INSERT INTO transactions") && s.bindArgs.includes("HOKM_WIN")
+    );
+    expect(wins).toHaveLength(1);
+    expect(wins[0].bindArgs[0]).toBe(100); // only the paid human
+    expect(wins[0].bindArgs[2]).toBe(2000); // bet / 2
   });
 });

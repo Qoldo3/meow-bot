@@ -166,7 +166,7 @@ app.post("/telegram/webhook", async (c) => {
       return c.json({ ok: true });
     }
     if (text.startsWith("دعوا")) {
-      await handleDuelRequest(token, db, message, c);
+      await handleDuelRequest(token, db, message);
       return c.json({ ok: true });
     }
 

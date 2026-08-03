@@ -10,8 +10,33 @@ A Telegram points/gamification bot running on **Cloudflare Workers** (Hono + D1 
 - ⚔️ Duels with ELO ratings (D1-persisted so they survive restarts)
 - 🏦 Group treasury + tax pools, 👥 clans
 - 🎉 Configurable bonus events (`/add event Name Multiplier Minutes`)
-- ♠️ **Hokm 2v2**: Telegram lobby → WebApp (WebSocket) → Durable Object game engine with alarms for turn/trump/draw timeouts
+- ♠️ **Hokm 2v2**: Telegram lobby → WebApp (WebSocket) → Durable Object game engine with alarms for turn/trump/draw timeouts; free practice mode vs AI bots (`/hokm bot`, no money involved)
 - 🔒 Owner panel (`/admin`) with broadcast, user management, DB repair, audit, and `/hokmcancel` to cancel an active Hokm game (refunds everyone)
+
+## Commands
+
+**Players**
+
+- `/start` — welcome message + main menu
+- `/me` — your profile (points, meows, duel rating, ranks, badge)
+- `/top` — group leaderboard · `/global` — global leaderboard · `/duelrank` — duel ELO leaderboard
+- `/daily` — daily reward (private chat only, 500 MP + streak)
+- `/pay` — transfer points: `/pay @user 100` or reply to a message with `/pay 100`
+- `/history` — your last transactions
+- `/lottery` / `/gamble` / `قمار` — lottery status; `/lottery buy 3` to buy tickets
+- `/dice` / `تاس` — roll the dice (doubles win big)
+- `/treasury` — group treasury balance
+- `/clan` / `/clans` — your clan; `/clan create Name`, `/clan join Name`
+- `/settings` — group settings · `/events` — active bonus events
+- `دعوا 500` (reply to someone) — challenge them to a duel (both stake the amount, ELO rated)
+- `/hokm 4000` — start a real 2v2 Hokm game (pot 4000 → 1000 per player)
+- `/hokm bot` — free practice game vs 3 AI bots (no betting)
+- `میو` / `meow` — earn random Meow Points (respects cooldown)
+
+**Owner only** (`BOT_OWNER_ID`): `/admin` panel, `/broadcast`, `/addpoints`, `/removepoints`,
+`/resetuser`, `/userinfo`, `/banuser`, `/unbanuser`, `/repair`, `/refreshbadge`,
+`/config`, `/groups`, `/duels`, `/audit`, `/hokmcancel`, and events
+(`/add event Name Multiplier Minutes`, `/edit event …`, `/delete event`).
 
 ## Stack
 
@@ -90,9 +115,9 @@ explicitly:
 
 ## Operational notes
 
-- **Expiry reliability**: duels and Hokm lobbies have an in-request `setTimeout`
-  fast path *and* a cron-triggered sweep (`src/sweep.ts`, every minute) as the
-  reliable backstop so escrowed points are always returned.
+- **Expiry reliability**: duels and Hokm lobbies are refunded by a cron-triggered
+  sweep (`src/sweep.ts`, every minute). In-request `setTimeout()` is unreliable
+  on Workers (isolates get evicted), so it is deliberately not used.
 - **One active Hokm game per group** is enforced when creating a lobby.
 - The webhook endpoint requires `X-Telegram-Bot-Api-Secret-Token` == `WEBHOOK_SECRET`.
 - `.dev.vars`, `.wrangler`, `dist` and `node_modules` are gitignored.
@@ -103,5 +128,5 @@ explicitly:
 npm test
 ```
 
-Covers the Hokm engine, initData auth, lobby persistence, lottery, pay
-transfers, treasury and group balance flows (43 tests).
+Covers the Hokm engine, initData auth, lobby persistence (incl. AI bot
+practice seats), lottery, pay transfers, treasury and group balance flows.

@@ -191,6 +191,9 @@ export function hokmBoardKeyboard(gameId: string, appUrl: string) {
       [
         { text: "♠️ بازی را باز کن", web_app: { url: `${appUrl}/hokm.html?game=${gameId}` } },
       ],
+      [
+        { text: "❌ لغو بازی", callback_data: `hokm:cancel:${gameId}` },
+      ],
     ],
   };
 }

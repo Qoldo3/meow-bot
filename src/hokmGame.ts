@@ -25,6 +25,9 @@ import {
 import { editMessageText } from "./telegram";
 import { hokmBoardKeyboard } from "./keyboards";
 
+/** AI seats act after this short delay instead of the full human turn timeout. */
+const BOT_ACTION_DELAY_MS = 1500;
+
 interface WsMeta {
   userId: number;
   name: string;
@@ -44,14 +47,14 @@ export class HokmGame {
 
   // ---- persistence -------------------------------------------------------
 
-  private async load(): Promise<void> {
+  private async load(gameIdHint?: string): Promise<void> {
     if (this.g) return;
     const stored = await this.state.storage.get<HokmGameState>("state");
     if (stored) {
       this.g = stored;
       return;
     }
-    await this.init();
+    await this.init(gameIdHint);
   }
 
   private async persist(): Promise<void> {
@@ -69,6 +72,17 @@ export class HokmGame {
     return this.env.HOKM_TURN_TIMEOUT_SEC ?? HOKM_TURN_TIMEOUT_SEC;
   }
 
+
+  /** True when the seat is held by an AI bot (negative user id). */
+  private isBot(seat: number): boolean {
+    const s = this.g?.seats[seat];
+    return !!s && s.userId < 0;
+  }
+
+  /** Bots act almost immediately; humans get the full turn timeout. */
+  private turnDeadlineFor(seat: number): number {
+    return Date.now() + (this.isBot(seat) ? BOT_ACTION_DELAY_MS : this.turnTimeout() * 1000);
+  }
   private trumpTimeout(): number {
     return this.env.HOKM_TRUMP_TIMEOUT_SEC ?? HOKM_TRUMP_TIMEOUT_SEC;
   }
@@ -81,9 +95,12 @@ export class HokmGame {
     return this.env.HOKM_AFK_STRIKES ?? HOKM_AFK_STRIKES;
   }
 
-  private async init(): Promise<void> {
+  private async init(gameIdHint?: string): Promise<void> {
     if (this.g) return;
-    const gameId = this.state.id.name;
+    // Prefer the game id passed from the request (fetch path / tests).
+    // state.id.name also carries it in production, but it is not always
+    // populated (e.g. the vitest-pool-workers harness), so the hint wins.
+    const gameId = gameIdHint ?? this.state.id.name;
     if (!gameId) return;
     const game = await getHokmGame(this.env.DB, gameId);
     if (!game || game.status !== "playing") return;
@@ -133,11 +150,16 @@ export class HokmGame {
   // ---- websocket plumbing ------------------------------------------------
 
   async fetch(request: Request): Promise<Response> {
-    await this.state.blockConcurrencyWhile(() => this.load());
+    // The game id is passed by the caller (X-Hokm-Game-Id header or the
+    // /api/hokm/:id/ws path); state.id.name is only a fallback because it is
+    // not always populated (e.g. in the vitest-pool-workers harness).
+    const url = new URL(request.url);
+    const pathGameId = url.pathname.match(/^\/api\/hokm\/([^/]+)\/ws$/)?.[1];
+    const gameIdHint = request.headers.get("X-Hokm-Game-Id") ?? pathGameId ?? undefined;
+    await this.state.blockConcurrencyWhile(() => this.load(gameIdHint));
 
     const upgrade = request.headers.get("Upgrade");
     if (upgrade !== "websocket") {
-      const url = new URL(request.url);
       if (url.pathname === "/init") {
         const appUrl = request.headers.get("X-Hokm-App-Url") ?? this.env.HOKM_APP_URL ?? "";
         if (this.g) this.g.appUrl = appUrl;
@@ -284,6 +306,11 @@ export class HokmGame {
       const meta = this.seatMeta(ws);
       if (meta && meta.seat != null) set.add(meta.seat);
     }
+    // AI bot seats are always "connected" so the mini app shows them online.
+    const g = this.g;
+    if (g) {
+      for (const s of g.seats) if (s && s.userId < 0) set.add(s.seat);
+    }
     return Array.from(set).sort((a, b) => a - b);
   }
 
@@ -359,9 +386,13 @@ export class HokmGame {
   private async checkAllJoined(): Promise<void> {
     const g = this.g!;
     if (g.phase !== "waiting_join") return;
-    if (this.connectedSeats().length === 4) {
-      await this.startMatch();
-    }
+    // All four seats must be occupied and every human player connected; AI
+    // bot seats are driven by the engine and never open a websocket.
+    if (g.seats.filter((s) => s !== null).length < 4) return;
+    const humansConnected = g.seats.every(
+      (s) => !s || s.userId < 0 || this.connectedSeats().includes(s.seat)
+    );
+    if (humansConnected) await this.startMatch();
   }
 
   private async startMatch(): Promise<void> {
@@ -408,7 +439,7 @@ export class HokmGame {
     }
     g.firstFive = firstFive;
     g.phase = "trump_call";
-    g.turnDeadline = Date.now() + this.trumpTimeout() * 1000;
+    g.turnDeadline = Date.now() + (this.isBot(hakem) ? BOT_ACTION_DELAY_MS : this.trumpTimeout() * 1000);
     g.trickPlays = [];
     g.trickWinnerSeat = null;
     g.tricksWon = [0, 0, 0, 0];
@@ -458,7 +489,7 @@ export class HokmGame {
     g.currentSeat = hakem;
     g.trickPlays = [];
     g.trickWinnerSeat = null;
-    g.turnDeadline = Date.now() + this.turnTimeout() * 1000;
+    g.turnDeadline = this.turnDeadlineFor(hakem);
     await this.persist();
 
     this.sendToSeat(hakem, { type: "hand", hand: g.hands[hakem], partial: false });
@@ -500,7 +531,7 @@ export class HokmGame {
       g.currentSeat = winner;
       g.trickPlays = [];
       g.trickWinnerSeat = null;
-      g.turnDeadline = Date.now() + this.turnTimeout() * 1000;
+      g.turnDeadline = this.turnDeadlineFor(winner);
       await this.persist();
       this.broadcast({ type: "state", state: this.publicState() });
       await this.setAlarm(g.turnDeadline, "turn");
@@ -508,7 +539,7 @@ export class HokmGame {
     }
 
     g.currentSeat = (seat + 1) % 4;
-    g.turnDeadline = Date.now() + this.turnTimeout() * 1000;
+    g.turnDeadline = this.turnDeadlineFor(g.currentSeat);
     await this.persist();
     this.broadcast({ type: "state", state: this.publicState() });
     await this.setAlarm(g.turnDeadline, "turn");
@@ -563,11 +594,15 @@ export class HokmGame {
     const card = lowestLegalCard(hand, ledSuit);
     if (!card) return;
 
-    g.strikes[seat] = (g.strikes[seat] ?? 0) + 1;
-    this.broadcast({ type: "notice", text: `⏱️ ${g.seats[seat]?.name ?? "بازیکن"} وقتش تمام شد و به‌صورت خودکار بازی کرد!` });
+    // AI bots auto-play as their normal move: no AFK strike, no notice.
+    const bot = this.isBot(seat);
+    if (!bot) {
+      g.strikes[seat] = (g.strikes[seat] ?? 0) + 1;
+      this.broadcast({ type: "notice", text: `⏱️ ${g.seats[seat]?.name ?? "بازیکن"} وقتش تمام شد و به‌صورت خودکار بازی کرد!` });
+    }
     await this.persist();
 
-    if (g.strikes[seat] >= this.afkStrikes()) {
+    if (!bot && g.strikes[seat] >= this.afkStrikes()) {
       await this.forfeit(seat);
       return;
     }
@@ -632,11 +667,12 @@ export class HokmGame {
     const team0 = g.seats.filter((s) => s && s.seat % 2 === 0).map((s) => s!.name).join(" & ") || "?";
     const team1 = g.seats.filter((s) => s && s.seat % 2 === 1).map((s) => s!.name).join(" & ") || "?";
     const trump = g.trumpSuit ? SUIT_SYMBOL_NAME(g.trumpSuit) : "—";
+    const practice = g.bet <= 0;
     let text =
       `♠️ <b>بازی حکم</b> ♠️\n\n` +
       `👥 تیم ۱: ${escapeName(team0)}\n` +
       `👥 تیم ۲: ${escapeName(team1)}\n\n` +
-      `💰 پات: <b>${g.bet} MP</b> (هر نفر ${g.perPlayer})\n` +
+      (practice ? `🎮 تمرینی — بدون شرطبندی\n` : `💰 پات: <b>${g.bet} MP</b> (هر نفر ${g.perPlayer})\n`) +
       `🏆 امتیاز: ${g.matchScores[0]} - ${g.matchScores[1]}\n` +
       `🔢 دست: ${g.handNumber}`;
 
@@ -648,7 +684,7 @@ export class HokmGame {
     }
     if (g.phase === "match_over") {
       const winnerNames = g.seats.filter((s) => s && s.seat % 2 === g.winnerTeam).map((s) => s!.name).join(" & ");
-      text += `\n🏁 <b>پایان بازی</b>\n🎉 برنده: ${escapeName(winnerNames)}\n💰 ${g.bet} MP`;
+      text += `\n🏁 <b>پایان بازی</b>\n🎉 برنده: ${escapeName(winnerNames)}` + (practice ? "" : `\n💰 ${g.bet} MP`);
     }
     if (g.phase === "cancelled") {
       text += `\n❌ بازی لغو شد و مبلغ‌ها برگشت.`;

@@ -1,7 +1,5 @@
-import { DuelState, RequestContext } from "./types";
+import { DuelState } from "./types";
 import { DUEL_TIMEOUT_SEC } from "./constants";
-import { telegramRequest } from "./telegram";
-import { escapeHtml } from "./utils";
 
 const ELO_K = 32;
 const ELO_FLOOR = 100;
@@ -64,44 +62,3 @@ export async function findOpenDuelAgainst(db: D1Database, groupId: number, targe
   return row?.duel_id;
 }
 
-export async function scheduleDuelTimeout(
-  c: RequestContext,
-  token: string,
-  db: D1Database,
-  duelId: string
-) {
-  const timeoutPromise = new Promise<void>((resolve) => {
-    setTimeout(async () => {
-      try {
-        const duel = await getDuel(db, duelId);
-        if (!duel) {
-          resolve();
-          return;
-        }
-
-        await deleteDuel(db, duelId);
-        await telegramRequest(token, "editMessageText", {
-          chat_id: duel.groupId,
-          message_id: duel.messageId,
-          text:
-            `⏱️ <b>دعوا منقضی شد!</b>
-` +
-            `🐱 ${escapeHtml(duel.challengerName)} 🆚 ${escapeHtml(duel.targetName)}
-` +
-            `💰 ${duel.amount} MP
-
-` +
-            `❌ ${escapeHtml(duel.targetName)} جواب نداد.`,
-          parse_mode: "HTML",
-        });
-      } catch (e) {
-        console.error("Duel timeout error:", e);
-      }
-      resolve();
-    }, DUEL_TIMEOUT_SEC * 1000);
-  });
-
-  if (c.executionCtx?.waitUntil) {
-    c.executionCtx.waitUntil(timeoutPromise);
-  }
-}

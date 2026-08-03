@@ -95,18 +95,18 @@ export async function getActiveHokmGame(db: D1Database, groupId: number): Promis
 export async function addHokmPlayer(
   db: D1Database,
   gameId: string,
-  player: { userId: number; username: string | null; firstName: string; seat: number; acceptedAt: number }
+  player: { userId: number; username: string | null; firstName: string; seat: number; acceptedAt: number; paid?: number }
 ): Promise<boolean> {
   const res = await db
     .prepare(
       `INSERT INTO hokm_game_players (game_id, telegram_user_id, seat, team, username, first_name, paid, accepted_at)
-       SELECT ?, ?, ?, ?, ?, ?, 1, ?
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?
        WHERE NOT EXISTS (SELECT 1 FROM hokm_game_players WHERE game_id = ? AND seat = ?)
          AND NOT EXISTS (SELECT 1 FROM hokm_game_players WHERE game_id = ? AND telegram_user_id = ?)
          AND (SELECT status FROM hokm_games WHERE game_id = ?) = 'lobby'`
     )
     .bind(
-      gameId, player.userId, player.seat, player.seat % 2, player.username, player.firstName, player.acceptedAt,
+      gameId, player.userId, player.seat, player.seat % 2, player.username, player.firstName, player.paid ?? 1, player.acceptedAt,
       gameId, player.seat,
       gameId, player.userId,
       gameId
@@ -230,4 +230,13 @@ export async function cancelHokmGame(db: D1Database, gameId: string): Promise<vo
   );
 
   await db.batch(batch);
+}
+
+/** Stable negative user id for an AI bot seat — never collides with real Telegram ids. */
+export function hokmBotUserId(seat: number): number {
+  return -(1000 + seat);
+}
+
+export function isHokmBotUserId(userId: number): boolean {
+  return userId < 0;
 }
