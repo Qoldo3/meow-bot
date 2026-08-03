@@ -27,7 +27,7 @@
   "vars": {
     // Public URL of the deployed worker (used for the Hokm WebApp button).
     // Leave unset to auto-derive it from the incoming request origin.
-    // "HOKM_APP_URL": "https://meow-bot.<your-subdomain>.workers.dev",
+    "HOKM_APP_URL": "https://meow-bot.amirmereza.workers.dev",
     // Optional: a user id that gets boosted meow tier chances (leave empty to disable).
     "MEOW_VIP_USER_ID": "",
     "HOKM_JOIN_TIMEOUT_SEC": 300,
