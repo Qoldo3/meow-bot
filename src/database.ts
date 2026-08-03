@@ -620,20 +620,25 @@ export async function findUserByUsername(db: D1Database, rawUsername: string) {
 
 export async function findUserById(db: D1Database, userId: number) {
   return db
-    .prepare(`SELECT telegram_id, username, first_name, meow_points, total_meows, daily_streak, last_daily_at, created_at, duel_rating FROM users WHERE telegram_id = ?`)
+    .prepare(`SELECT telegram_id, username, first_name, meow_points, total_meows, daily_streak, last_daily_at, created_at FROM users WHERE telegram_id = ?`)
     .bind(userId)
-    .first<{ telegram_id: number; username: string | null; first_name: string; meow_points: number; total_meows: number; daily_streak: number; last_daily_at: number | null; created_at: number; duel_rating: number }>();
+    .first<{ telegram_id: number; username: string | null; first_name: string; meow_points: number; total_meows: number; daily_streak: number; last_daily_at: number | null; created_at: number }>();
 }
 
-export async function getDuelRating(db: D1Database, userId: number): Promise<number> {
+export async function getDuelRating(db: D1Database, userId: number, groupId?: number): Promise<number> {
+  if (groupId != null) {
+    const row = await db.prepare(`SELECT duel_rating FROM group_members WHERE telegram_group_id = ? AND telegram_user_id = ?`).bind(groupId, userId).first<{ duel_rating: number }>();
+    return row?.duel_rating ?? 1000;
+  }
+  // Fallback: global rating (for contexts without a group, e.g. owner panel)
   const row = await db.prepare(`SELECT duel_rating FROM users WHERE telegram_id = ?`).bind(userId).first<{ duel_rating: number }>();
   return row?.duel_rating ?? 1000;
 }
 
-export async function getDuelLeaderboard(db: D1Database, limit: number = 10) {
+export async function getDuelLeaderboard(db: D1Database, groupId: number, limit: number = 10) {
   return db
-    .prepare(`SELECT first_name, username, duel_rating FROM users ORDER BY duel_rating DESC LIMIT ?`)
-    .bind(limit)
+    .prepare(`SELECT first_name, username, duel_rating FROM group_members WHERE telegram_group_id = ? ORDER BY duel_rating DESC LIMIT ?`)
+    .bind(groupId, limit)
     .all<{ first_name: string; username: string | null; duel_rating: number }>();
 }
 

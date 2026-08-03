@@ -512,7 +512,9 @@ export async function handleMe(token: string, db: D1Database, env: Bindings, mes
   const stats = await getUserStats(db, message.from.id);
   const activeEvent = await getActiveEvent(db, env);
   const rank = await getGlobalRank(db, message.from.id);
-  const duelRating = await getDuelRating(db, message.from.id);
+  const duelRating = message.chat.type !== "private"
+    ? await getDuelRating(db, message.from.id, message.chat.id)
+    : await getDuelRating(db, message.from.id);
 
   let text =
     `🐱 پروفایل <b>${escapeHtml(message.from.first_name)}</b>\n\n` +
@@ -748,7 +750,11 @@ export async function handleDuelRank(token: string, db: D1Database, message: Tel
   if (!message.from) return;
   await ensureUser(db, message.from);
 
-  const leaderboard = await getDuelLeaderboard(db, 10);
+  if (message.chat.type === "private") {
+    await sendMessage(token, message.chat.id, "🐱 /duelrank فقط داخل گروه کار می‌کنه!");
+    return;
+  }
+  const leaderboard = await getDuelLeaderboard(db, message.chat.id, 10);
   const medals = ["🥇", "🥈", "🥉"];
 
   let text = `⚔️ <b>رتبه‌بندی دعوا</b>\n\n`;
@@ -764,7 +770,7 @@ export async function handleDuelRank(token: string, db: D1Database, message: Tel
     text += "🐱 هنوز کسی دعوا نکرده!";
   }
 
-  const myRating = await getDuelRating(db, message.from.id);
+  const myRating = await getDuelRating(db, message.from.id, message.chat.id);
   text += `\n\n⚔️ ریتینگ شما: <b>${myRating}</b>\n\n✨ برای افزایش ریتینگ، توی گروه ریپلای کن و بنویس:\n<code>دعوا 500</code>`;
 
   await sendMessage(token, message.chat.id, text, { reply_markup: mainMenuKeyboard(message.from?.id) });
@@ -1316,8 +1322,8 @@ export async function handleDuelRequest(
 
   const duelId = generateDuelId();
   const nowSec = Math.floor(Date.now() / 1000);
-  const challengerRating = await getDuelRating(db, message.from.id);
-  const targetRating = await getDuelRating(db, target.id);
+  const challengerRating = await getDuelRating(db, message.from.id, message.chat.id);
+  const targetRating = await getDuelRating(db, target.id, message.chat.id);
 
   const res = await telegramRequest(token, "sendMessage", {
     chat_id: message.chat.id,
@@ -1463,8 +1469,8 @@ export async function handleDuelAccept(
   const winnerReward = duel.amount * 2;
   const winnerNetGain = duel.amount;
 
-  const challengerRating = await getDuelRating(db, duel.challengerId);
-  const targetRating = await getDuelRating(db, duel.targetId);
+  const challengerRating = await getDuelRating(db, duel.challengerId, duel.groupId);
+  const targetRating = await getDuelRating(db, duel.targetId, duel.groupId);
   const [newChallengerRating, newTargetRating] = computeElo(
     challengerRating,
     targetRating,
@@ -1480,8 +1486,8 @@ export async function handleDuelAccept(
       .bind(duel.targetId, duel.groupId, -duel.amount, `DUEL_BET`, now),
     db.prepare(`INSERT INTO transactions (telegram_user_id, group_id, amount, reason, created_at) VALUES (?, ?, ?, ?, ?)`)
       .bind(winnerId, duel.groupId, winnerReward, `DUEL_WIN`, now),
-    db.prepare(`UPDATE users SET duel_rating = ? WHERE telegram_id = ?`).bind(newChallengerRating, duel.challengerId),
-    db.prepare(`UPDATE users SET duel_rating = ? WHERE telegram_id = ?`).bind(newTargetRating, duel.targetId),
+    db.prepare(`UPDATE group_members SET duel_rating = ? WHERE telegram_group_id = ? AND telegram_user_id = ?`).bind(newChallengerRating, duel.groupId, duel.challengerId),
+    db.prepare(`UPDATE group_members SET duel_rating = ? WHERE telegram_group_id = ? AND telegram_user_id = ?`).bind(newTargetRating, duel.groupId, duel.targetId),
   ]);
 
   await editMessageText(

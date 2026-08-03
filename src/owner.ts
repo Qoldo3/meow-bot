@@ -267,7 +267,7 @@ export async function handleOwnerUserInfo(token: string, db: D1Database, env: Bi
   text += `💰 امتیاز: <b>${user.meow_points} MP</b>\n`;
   text += `🐾 کل میوها: <b>${user.total_meows}</b>\n`;
   text += `🏆 رتبه جهانی: <b>#${rank}</b>\n`;
-  text += `⚔️ ریتینگ دعوا: <b>${user.duel_rating ?? 1000}</b>\n`;
+  // duel_rating is now per-group; shown in the group context below
   text += `🔥 استریک: <b>${user.daily_streak} روز</b>\n`;
   text += `📅 عضویت: <b>${createdDate}</b>\n`;
   text += `🚫 وضعیت: <b>${banned ? "❌ بن شده" : "✅ فعال"}</b>\n\n`;
@@ -772,7 +772,7 @@ export async function handleOwnerPanelAction(
         `👤 <b>${escapeHtml(user.first_name)}</b>\n\n` +
         `🆔 <code>${user.telegram_id}</code>\n` +
         `💰 ${user.meow_points} MP | 🏆 #${rank}\n` +
-        `⚔️ ${user.duel_rating ?? 1000} | 🐾 ${user.total_meows} | 🔥 ${user.daily_streak} روز`;
+        `🐾 ${user.total_meows} | 🔥 ${user.daily_streak} روز`;
       await editMessageText(token, chatId, messageId, text, userActionKeyboard(targetUserId, userId));
     }
     return;

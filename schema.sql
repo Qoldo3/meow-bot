@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS group_members (
     last_dice_at INTEGER,
     lottery_bonus_tickets INTEGER NOT NULL DEFAULT 0,
     lottery_meow_credit INTEGER NOT NULL DEFAULT 0,
+    duel_rating INTEGER NOT NULL DEFAULT 1000,
     PRIMARY KEY (telegram_group_id, telegram_user_id)
 );
 
