@@ -695,7 +695,18 @@ export class HokmGame {
   private async editBoard(): Promise<void> {
     const g = this.g!;
     if (g.boardMsgId == null) return;
-    await editMessageText(this.env.TELEGRAM_BOT_TOKEN, g.groupId, g.boardMsgId, this.boardText(), hokmBoardKeyboard(g.gameId, g.appUrl));
+    const res = await editMessageText(
+      this.env.TELEGRAM_BOT_TOKEN,
+      g.groupId,
+      g.boardMsgId,
+      this.boardText(),
+      hokmBoardKeyboard(g.gameId, g.appUrl)
+    );
+    if (!res?.ok) {
+      // WebApp button rejected (domain not registered in BotFather) — edit
+      // without it so the group board still updates.
+      await editMessageText(this.env.TELEGRAM_BOT_TOKEN, g.groupId, g.boardMsgId, this.boardText());
+    }
   }
 }
 

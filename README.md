@@ -103,6 +103,11 @@ The Hokm "open game" button needs the public URL of the worker. It is derived
 automatically from the request origin at game creation; you can also set it
 explicitly:
 
+> ⚠️ For the "بازی را باز کن" WebApp button to work, register the worker
+> domain in @BotFather (`/setdomain`) — otherwise Telegram rejects the button
+> with `BUTTON_TYPE_INVALID`. The bot then falls back to a plain play link +
+> cancel button, so games still start.
+
 ```jsonc
 // wrangler.jsonc
 "vars": { "HOKM_APP_URL": "https://meow-bot.<subdomain>.workers.dev" }

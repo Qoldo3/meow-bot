@@ -773,7 +773,7 @@ export async function handleDuelRank(token: string, db: D1Database, message: Tel
   const myRating = await getDuelRating(db, message.from.id, message.chat.id);
   text += `\n\n⚔️ ریتینگ شما: <b>${myRating}</b>\n\n✨ برای افزایش ریتینگ، توی گروه ریپلای کن و بنویس:\n<code>دعوا 500</code>`;
 
-  await sendMessage(token, message.chat.id, text, { reply_markup: mainMenuKeyboard(message.from?.id) });
+  await sendMessage(token, message.chat.id, text);
 }
 
 export async function handleTreasury(token: string, db: D1Database, message: TelegramMessage) {
@@ -1541,6 +1541,46 @@ export async function handleDuelDecline(token: string, db: D1Database, callback:
   await answerCallback(token, callback.id, "✅ دعوا لغو شد.");
 }
 
+/**
+ * Sends the Hokm board message. Tries with the WebApp "open game" button
+ * first; if Telegram rejects it (web_app requires the bot's WebApp domain to
+ * be registered in @BotFather, otherwise sendMessage fails with
+ * BUTTON_TYPE_INVALID), falls back to a cancel button + a plain play link so
+ * the game still works.
+ */
+async function sendHokmBoardMessage(
+  token: string,
+  chatId: number,
+  text: string,
+  gameId: string,
+  appUrl: string
+): Promise<number> {
+  const playUrl = appUrl ? `${appUrl}/hokm.html?game=${gameId}` : "";
+  const webAppOk =
+    !!appUrl &&
+    (appUrl.startsWith("https://") ||
+      appUrl.startsWith("http://localhost") ||
+      appUrl.startsWith("http://127.0.0.1"));
+
+  if (webAppOk) {
+    const res = await sendMessage(token, chatId, text, {
+      reply_markup: hokmBoardKeyboard(gameId, appUrl),
+    });
+    if (res.result?.message_id) return res.result.message_id;
+    // WebApp button rejected (domain not registered) — fall through.
+  }
+
+  const fallbackText = playUrl
+    ? `${text}\n\n🔗 <a href="${escapeHtml(playUrl)}">باز کردن بازی</a>`
+    : text;
+  const res = await sendMessage(token, chatId, fallbackText, {
+    reply_markup: {
+      inline_keyboard: [[{ text: "❌ لغو بازی", callback_data: `hokm:cancel:${gameId}` }]],
+    },
+  });
+  return res.result?.message_id ?? 0;
+}
+
 export async function handleHokmRequest(
   token: string,
   db: D1Database,
@@ -1739,23 +1779,17 @@ export async function handleHokmRequest(
     return;
   }
 
-  const boardRes = await sendMessage(
+  const boardMsgId = await sendHokmBoardMessage(
     token,
     message.chat.id,
-    `🎴 <b>بازی حکم — تمرینی با ربات!</b>
-
-` +
-      `${lines}
-
-` +
-      `💰 این بازی رایگانه — بدون شرطبندی!
-` +
-      `🤖 ۳ ربات به بازی اضافه شدن.
-` +
+    `🎴 <b>بازی حکم — تمرینی با ربات!</b>\n\n` +
+      `${lines}\n\n` +
+      `💰 این بازی رایگانه — بدون شرطبندی!\n` +
+      `🤖 ۳ ربات به بازی اضافه شدن.\n` +
       `⬇️ دکمه بازی رو بزن تا وارد بشی!`,
-    appUrl ? { reply_markup: hokmBoardKeyboard(gameId, appUrl) } : {}
+    gameId,
+    appUrl
   );
-  const boardMsgId = boardRes.result?.message_id ?? 0;
   if (!boardMsgId) {
     await cancelHokmGame(db, gameId);
     if (lobbyMsgId) await deleteMessage(token, message.chat.id, lobbyMsgId);
@@ -1899,17 +1933,16 @@ export async function handleHokmAccept(
   }
 
   const baseUrl = game.app_url || env.HOKM_APP_URL || "";
-  const boardMarkup = baseUrl ? { reply_markup: hokmBoardKeyboard(gameId, baseUrl) } : {};
-  const boardRes = await sendMessage(
+  const boardMsgId = await sendHokmBoardMessage(
     token,
     game.group_id,
     `🎴 <b>بازی حکم شروع شد!</b>\n\n${lines}\n\n` +
       `💰 پات: <b>${game.bet} MP</b>\n` +
       `🏆 برنده تیم: ${game.bet} MP\n\n` +
       `⬇️ دکمه بازی رو بزن تا وارد بشی!`,
-    boardMarkup
+    gameId,
+    baseUrl
   );
-  const boardMsgId = boardRes.result?.message_id ?? 0;
   if (!boardMsgId) {
     await cancelHokmGame(db, gameId);
     if (game.board_msg_id) {

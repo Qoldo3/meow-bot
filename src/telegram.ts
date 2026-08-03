@@ -60,7 +60,7 @@ export async function editMessageText(
   text: string,
   replyMarkup?: any
 ) {
-  await telegramRequest(token, "editMessageText", {
+  return telegramRequest(token, "editMessageText", {
     chat_id: chatId,
     message_id: messageId,
     text,
