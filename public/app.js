@@ -336,6 +336,14 @@
     showNotice._t = setTimeout(() => msg.classList.add("hidden"), 4000);
   }
 
+  function showNoticePersistent(text) {
+    const msg = $("message");
+    msg.textContent = text;
+    msg.classList.remove("hidden");
+    msg.classList.add("warn");
+    clearTimeout(showNotice._t);
+  }
+
   // ---- websocket ---------------------------------------------------------
 
   function wsUrl() {
@@ -359,9 +367,18 @@
       handle(msg);
     };
 
+    ws.onerror = () => {
+      if (!state.st) {
+        showNoticePersistent("⚠️ اتصال به بازی برقرار نشد. مطمئن شو بازی رو از دکمه «بازی را باز کن» داخل تلگرام باز کردی.");
+      }
+    };
+
     ws.onclose = () => {
       state.ws = null;
-      if (!state.st) return;
+      if (!state.st) {
+        showNoticePersistent("⚠️ اتصال به بازی برقرار نشد (تأیید هویت ناموفق). بازی باید از دکمه «بازی را باز کن» داخل تلگرام باز بشه — لینک ساده بدون دکمه کار نمی‌کنه.");
+        return;
+      }
       if (state.st.phase === "match_over" || state.st.phase === "cancelled") return;
       setTimeout(connect, 2000);
     };
@@ -435,6 +452,12 @@
 
     if (!state.gameId) {
       showNotice("لینک بازی نامعتبر است.", true);
+      return;
+    }
+
+    const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp.initData : "";
+    if (!tg) {
+      showNoticePersistent("⚠️ این بازی باید از داخل تلگرام و با دکمه «بازی را باز کن» باز بشه (دکمه Mini App). لینک ساده بدون دکمه کار نمی‌کنه.");
       return;
     }
 

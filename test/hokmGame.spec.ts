@@ -96,4 +96,40 @@ describe("HokmGame DO - practice mode with AI bots", () => {
       expect(inst.g!.phase).toBe("waiting_join");
     });
   });
+
+  it("progresses the match: hakem draw -> full 13-card deal -> trump_call", async () => {
+    const gameId = "bot-game-deal";
+    await seedPracticeGame(gameId);
+
+    const stub = env.HOKM_GAME.get(env.HOKM_GAME.idFromName(gameId));
+    await runInDurableObject(stub, async (instance) => {
+      const inst = instance as unknown as {
+        g: any;
+        load(gameId?: string): Promise<void>;
+        startMatch(): Promise<void>;
+        revealNext(): Promise<void>;
+      };
+      await inst.load(gameId);
+      await inst.startMatch();
+
+      // Walk the hakem draw sequence until the Ace is found (revealNext
+      // advances drawIndex; beginDeal runs when the Ace is revealed).
+      let guard = 0;
+      while (inst.g.phase === "drawing_hakem" && guard < 60) {
+        await inst.revealNext();
+        guard++;
+      }
+
+      expect(inst.g.phase).toBe("trump_call");
+      expect(inst.g.hakemSeat).not.toBeNull();
+      expect(inst.g.firstFive.length).toBe(5);
+      // All 52 cards are dealt across the four hands.
+      const hands: Record<number, string[]> = inst.g.hands;
+      const total = Object.values(hands).reduce((a: number, h: string[]) => a + h.length, 0);
+      expect(total).toBe(52);
+      for (let seat = 0; seat < 4; seat++) {
+        expect(hands[seat].length).toBe(13);
+      }
+    });
+  });
 });

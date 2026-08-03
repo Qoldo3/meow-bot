@@ -1571,7 +1571,7 @@ async function sendHokmBoardMessage(
   }
 
   const fallbackText = playUrl
-    ? `${text}\n\n🔗 <a href="${escapeHtml(playUrl)}">باز کردن بازی</a>`
+    ? `${text}\n\n🔗 <a href="${escapeHtml(playUrl)}">باز کردن بازی</a>\n\n⚠️ اگه دکمه «بازی را باز کن» کار نکرد، دامنه WebApp ربات رو در BotFather ثبت کن (/setdomain).`
     : text;
   const res = await sendMessage(token, chatId, fallbackText, {
     reply_markup: {
