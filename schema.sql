@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS group_members (
     active_title_id INTEGER,
     active_booster_multiplier INTEGER NOT NULL DEFAULT 0,
     active_booster_until INTEGER NOT NULL DEFAULT 0,
+    booster_paused_at INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (telegram_group_id, telegram_user_id)
 );
 

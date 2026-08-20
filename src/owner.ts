@@ -39,6 +39,7 @@ import {
   deleteDuel,
 } from "./duel";
 import { cancelAuctionById } from "./titleAuction";
+import { computeMeowEarnings } from "./handlers";
 import {
   escapeHtml,
   safeParseAmount,
@@ -155,6 +156,11 @@ export async function handleAdmin(token: string, _db: D1Database, env: Bindings,
   const n = (r: any) => r?.results?.[0]?.c ?? 0;
   const s = (r: any) => r?.results?.[0]?.value ?? "";
   const maintenanceOn = s(maintenance) === "1";
+  const avgRow = await env.DB
+    .prepare(`SELECT AVG(total_meows) as c FROM users WHERE telegram_id != ? AND telegram_id != ?`)
+    .bind(env.BOT_OWNER_ID, env.MEOW_VIP_USER_ID ?? "-1")
+    .first<{ c: number | null }>();
+  const earnings = await computeMeowEarnings(env.DB);
 
   const text =
     `🛡️ <b>Owner Panel</b>\n\n` +
@@ -164,6 +170,8 @@ export async function handleAdmin(token: string, _db: D1Database, env: Bindings,
     `🏦 خزانه‌ها: <b>${Number(n(treasuries)).toLocaleString("en-US")} MP</b>\n` +
     `🎟️ پات لاتاری: <b>${Number(n(pots)).toLocaleString("en-US")} MP</b>\n` +
     `🐾 میوهای امروز: <b>${n(today)}</b>\n` +
+    `🐾 میانگین میو/کاربر (بدون صاحب و VIP): <b>${(avgRow?.c ?? 0).toFixed(1)}</b>\n` +
+    `💎 ارزش هر میو: <b>${earnings.perMeow} MP</b> | ⏱️ درآمد ۱ ساعت: <b>${earnings.perHour} MP</b>\n` +
     `🎯 رویداد فعال: <b>${n(activeEvents)}</b> | ` +
     `🏷️ حراج باز: <b>${n(openAuctions)}</b> | ` +
     `⚔️ دعوای در انتظار: <b>${n(pendingDuels)}</b>\n` +
@@ -173,7 +181,7 @@ export async function handleAdmin(token: string, _db: D1Database, env: Bindings,
   await sendMessage(token, message.chat.id, text, { reply_markup: ownerPanelKeyboard(message.from?.id) });
 }
 
-async function renderStatsPage(token: string, db: D1Database, chatId: number, messageId: number, userId: number) {
+async function renderStatsPage(token: string, db: D1Database, env: Bindings, chatId: number, messageId: number, userId: number) {
   const now = Math.floor(Date.now() / 1000);
   const dayStart = tehranDayStart(now);
   const [users, groups, totalGroups, circulation, treasuries, pots, today, activeEvents, openAuctions, pendingDuels, maintenance] = await db.batch([
@@ -193,6 +201,11 @@ async function renderStatsPage(token: string, db: D1Database, chatId: number, me
   const n = (r: any) => r?.results?.[0]?.c ?? 0;
   const s = (r: any) => r?.results?.[0]?.value ?? "";
   const maintenanceOn = s(maintenance) === "1";
+  const avgRow = await db
+    .prepare(`SELECT AVG(total_meows) as c FROM users WHERE telegram_id != ? AND telegram_id != ?`)
+    .bind(env.BOT_OWNER_ID, env.MEOW_VIP_USER_ID ?? "-1")
+    .first<{ c: number | null }>();
+  const earnings = await computeMeowEarnings(db);
   const text =
     `📊 <b>آمار ربات</b>\n\n` +
     `👤 کاربران: <b>${n(users)}</b>\n` +
@@ -201,6 +214,8 @@ async function renderStatsPage(token: string, db: D1Database, chatId: number, me
     `🏦 مجموع خزانه‌ها: <b>${Number(n(treasuries)).toLocaleString("en-US")} MP</b>\n` +
     `🎟️ مجموع پات لاتاری: <b>${Number(n(pots)).toLocaleString("en-US")} MP</b>\n` +
     `🐾 میوهای امروز: <b>${n(today)}</b>\n` +
+    `🐾 میانگین میو/کاربر (بدون صاحب و VIP): <b>${(avgRow?.c ?? 0).toFixed(1)}</b>\n` +
+    `💎 ارزش هر میو: <b>${earnings.perMeow} MP</b> | ⏱️ درآمد ۱ ساعت: <b>${earnings.perHour} MP</b> (کولداون ۵ دقیقه)\n` +
     `🎯 رویداد فعال: <b>${n(activeEvents)}</b>\n` +
     `🏷️ حراج‌های باز: <b>${n(openAuctions)}</b>\n` +
     `⚔️ دعواهای در انتظار: <b>${n(pendingDuels)}</b>\n` +
@@ -1276,7 +1291,7 @@ export async function handleOwnerPanelAction(
     const sub = params[0];
     switch (sub) {
       case "stats":
-        await renderStatsPage(token, db, chatId, messageId, userId);
+        await renderStatsPage(token, db, env, chatId, messageId, userId);
         break;
       case "users":
         await edit("👤 <b>مدیریت کاربران</b>\n\nاز منوی زیر انتخاب کن:", usersMenuKeyboard(userId));

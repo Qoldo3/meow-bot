@@ -7,6 +7,7 @@ import {
   sweepRepostAuctions,
   recoverStuckSettlingAuctions,
 } from "./titleAuction";
+import { sweepBoosters } from "./database";
 
 /**
  * Scheduled cleanup (runs every minute via the cron trigger in wrangler.jsonc).
@@ -66,8 +67,8 @@ export async function sweepExpiredDuels(db: D1Database, token: string): Promise<
   return edited;
 }
 
-export async function runSweep(db: D1Database, token: string): Promise<{ duels: number; titleAuctions: number; dueAuctions: number; repostedAuctions: number; recoveredSettling: number }> {
-  if (!token) return { duels: 0, titleAuctions: 0, dueAuctions: 0, repostedAuctions: 0, recoveredSettling: 0 };
+export async function runSweep(db: D1Database, token: string): Promise<{ duels: number; titleAuctions: number; dueAuctions: number; repostedAuctions: number; recoveredSettling: number; boosters: number }> {
+  if (!token) return { duels: 0, titleAuctions: 0, dueAuctions: 0, repostedAuctions: 0, recoveredSettling: 0, boosters: 0 };
 
   // Each step is independent: a failure in one must not kill the sweep for the
   // rest (a stuck auction already costs money — a crashed step would too).
@@ -100,5 +101,11 @@ export async function runSweep(db: D1Database, token: string): Promise<{ duels: 
   if (repostedAuctions > 0) {
     console.log(`[sweep] reposted title auction boards: ${repostedAuctions}`);
   }
-  return { duels, titleAuctions, dueAuctions, repostedAuctions, recoveredSettling };
+  // Boosters freeze while an event runs and resume when it stops. The sweep is
+  // what flips those states even when nobody meows.
+  const boosters = await step(() => sweepBoosters(db), "boosters");
+  if (boosters > 0) {
+    console.log(`[sweep] booster states updated: ${boosters}`);
+  }
+  return { duels, titleAuctions, dueAuctions, repostedAuctions, recoveredSettling, boosters };
 }

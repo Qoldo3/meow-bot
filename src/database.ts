@@ -695,25 +695,146 @@ export async function applyPayTransfer(db: D1Database, fromUserId: number, toUse
 
 // ---------------------------------------------------------------------------
 // Boosters — per-group temporary meow multipliers
+//
+// A booster pauses while an event is running: its countdown freezes at
+// booster_paused_at (0 = running) and resumes when the event stops. The
+// multiplier is also suspended while paused, so boosters only ever apply
+// outside events. Resume/pause transitions run lazily (on read) and from the
+// minute sweep, so a booster never ticks or expires during an event.
 // ---------------------------------------------------------------------------
+
+export type ActiveEventWindow = { start_at: number; end_at: number } | null;
+
+export async function getActiveEventWindow(db: D1Database, now: number): Promise<ActiveEventWindow> {
+  return (
+    (await db
+      .prepare(`SELECT start_at, end_at FROM events WHERE is_active = 1 AND start_at <= ? AND end_at >= ? ORDER BY created_at DESC LIMIT 1`)
+      .bind(now, now)
+      .first<{ start_at: number; end_at: number }>()) ?? null
+  );
+}
+
+type BoosterRow = {
+  telegram_group_id: number;
+  telegram_user_id: number;
+  active_booster_multiplier: number;
+  active_booster_until: number;
+  booster_paused_at: number;
+};
+
+type BoosterUpdate =
+  | { stmt: D1PreparedStatement; state: { alive: boolean; paused: boolean; until: number } }
+  | null;
+
+/**
+ * Pure transition logic: given the current booster row and event window,
+ * decide whether to pause, resume or drop the booster. Returns the UPDATE
+ * statement (or null when nothing changes) plus the resulting state.
+ */
+export function boosterStateUpdate(db: D1Database, row: BoosterRow, event: ActiveEventWindow, now: number): BoosterUpdate {
+  const paused = row.booster_paused_at > 0;
+  const remaining = row.active_booster_until - row.booster_paused_at;
+
+  if (paused) {
+    // Frozen. Resume only once no event is running anymore.
+    if (event) return null;
+    const until = now + Math.max(0, remaining);
+    return {
+      stmt: db
+        .prepare(`UPDATE group_members SET active_booster_until = ?, booster_paused_at = 0 WHERE telegram_group_id = ? AND telegram_user_id = ?`)
+        .bind(until, row.telegram_group_id, row.telegram_user_id),
+      state: { alive: remaining > 0, paused: false, until },
+    };
+  }
+
+  if (!event) return null;
+
+  if (row.active_booster_until <= event.start_at) {
+    // Already expired before the event started → drop it.
+    return {
+      stmt: db
+        .prepare(`UPDATE group_members SET active_booster_multiplier = 0, active_booster_until = 0, booster_paused_at = 0 WHERE telegram_group_id = ? AND telegram_user_id = ?`)
+        .bind(row.telegram_group_id, row.telegram_user_id),
+      state: { alive: false, paused: false, until: 0 },
+    };
+  }
+
+  // The event started while the booster was still alive: freeze it at the
+  // event start so the span [event.start_at, now] is not counted.
+  const until = now + (row.active_booster_until - event.start_at);
+  return {
+    stmt: db
+      .prepare(`UPDATE group_members SET active_booster_until = ?, booster_paused_at = ? WHERE telegram_group_id = ? AND telegram_user_id = ?`)
+      .bind(until, now, row.telegram_group_id, row.telegram_user_id),
+    state: { alive: true, paused: true, until },
+  };
+}
+
+/** Lazily reconcile one user's booster against the current event (on read). */
+export async function reconcileBoosterState(db: D1Database, groupId: number, userId: number, now = Math.floor(Date.now() / 1000)) {
+  const row = await db
+    .prepare(
+      `SELECT telegram_group_id, telegram_user_id, active_booster_multiplier, active_booster_until, booster_paused_at
+       FROM group_members WHERE telegram_group_id = ? AND telegram_user_id = ? AND active_booster_multiplier > 0`
+    )
+    .bind(groupId, userId)
+    .first<BoosterRow>();
+  if (!row || row.active_booster_until <= 0) return;
+  const event = await getActiveEventWindow(db, now);
+  const update = boosterStateUpdate(db, row, event, now);
+  if (update) await update.stmt.run();
+}
+
+/** Bulk reconcile for the minute sweep — stays under the 50-query cap. */
+export async function sweepBoosters(db: D1Database): Promise<number> {
+  const now = Math.floor(Date.now() / 1000);
+  const event = await getActiveEventWindow(db, now);
+  const rows = await db
+    .prepare(
+      `SELECT telegram_group_id, telegram_user_id, active_booster_multiplier, active_booster_until, booster_paused_at
+       FROM group_members WHERE active_booster_multiplier > 0 AND active_booster_until > 0`
+    )
+    .all<BoosterRow>();
+
+  const updates: D1PreparedStatement[] = [];
+  for (const row of rows.results) {
+    const update = boosterStateUpdate(db, row, event, now);
+    if (update) updates.push(update.stmt);
+  }
+
+  // Chunk at 40: 2 reads + 40 statements stays under the 50-query cap.
+  for (let i = 0; i < updates.length; i += 40) {
+    await db.batch(updates.slice(i, i + 40));
+  }
+  return updates.length;
+}
+
+export type BoosterStatus = { multiplier: number; until: number; remaining: number; paused: boolean };
 
 export async function getBoosterStatus(
   db: D1Database,
   groupId: number,
   userId: number
-): Promise<{ multiplier: number; until: number } | null> {
+): Promise<BoosterStatus | null> {
+  const now = Math.floor(Date.now() / 1000);
+  await reconcileBoosterState(db, groupId, userId, now);
+
   const row = await db
     .prepare(
-      `SELECT active_booster_multiplier, active_booster_until
-       FROM group_members
-       WHERE telegram_group_id = ? AND telegram_user_id = ?`
+      `SELECT active_booster_multiplier, active_booster_until, booster_paused_at
+       FROM group_members WHERE telegram_group_id = ? AND telegram_user_id = ?`
     )
     .bind(groupId, userId)
-    .first<{ active_booster_multiplier: number; active_booster_until: number }>();
+    .first<{ active_booster_multiplier: number; active_booster_until: number; booster_paused_at: number }>();
   if (!row || row.active_booster_multiplier <= 0 || row.active_booster_until <= 0) return null;
-  const now = Math.floor(Date.now() / 1000);
-  if (row.active_booster_until <= now) return null;
-  return { multiplier: row.active_booster_multiplier, until: row.active_booster_until };
+
+  const paused = row.booster_paused_at > 0;
+  const remaining = paused
+    ? Math.max(0, row.active_booster_until - row.booster_paused_at)
+    : Math.max(0, row.active_booster_until - now);
+  if (!paused && remaining <= 0) return null;
+
+  return { multiplier: row.active_booster_multiplier, until: row.active_booster_until, remaining, paused };
 }
 
 export async function buyBooster(
@@ -723,7 +844,7 @@ export async function buyBooster(
   multiplier: number,
   durationSec: number,
   cost: number
-): Promise<{ success: boolean; reason?: string }> {
+): Promise<{ success: boolean; reason?: string; paused?: boolean }> {
   const now = Math.floor(Date.now() / 1000);
 
   // 4h purchase cooldown, enforced via the BOOSTER_* transaction rows (no
@@ -737,6 +858,11 @@ export async function buyBooster(
   }
 
   const until = now + durationSec;
+
+  // Bought while an event is running? Start paused — the countdown only begins
+  // once the event stops (the full duration is preserved).
+  const event = await getActiveEventWindow(db, now);
+  const pausedAt = event ? now : 0;
 
   // Check and debit from both balances (all-or-nothing)
   const res = await db.batch([
@@ -757,28 +883,41 @@ export async function buyBooster(
   await db.batch([
     db.prepare(
       `UPDATE group_members
-       SET active_booster_multiplier = ?, active_booster_until = ?
+       SET active_booster_multiplier = ?, active_booster_until = ?, booster_paused_at = ?
        WHERE telegram_group_id = ? AND telegram_user_id = ?`
     )
-      .bind(multiplier, until, groupId, userId),
+      .bind(multiplier, until, pausedAt, groupId, userId),
     db.prepare(`INSERT INTO transactions (telegram_user_id, group_id, amount, reason, created_at) VALUES (?, ?, ?, ?, ?)`)
       .bind(userId, groupId, -cost, `BOOSTER_${multiplier}x`, now),
   ]);
 
-  return { success: true };
+  return { success: true, paused: pausedAt > 0 };
 }
 
 export async function getActiveBoosterMultiplier(db: D1Database, groupId: number, userId: number): Promise<number> {
   const now = Math.floor(Date.now() / 1000);
   const row = await db
     .prepare(
-      `SELECT active_booster_multiplier FROM group_members
-       WHERE telegram_group_id = ? AND telegram_user_id = ?
-         AND active_booster_multiplier > 0 AND active_booster_until > ?`
+      `SELECT telegram_group_id, telegram_user_id, active_booster_multiplier, active_booster_until, booster_paused_at
+       FROM group_members WHERE telegram_group_id = ? AND telegram_user_id = ? AND active_booster_multiplier > 0`
     )
-    .bind(groupId, userId, now)
-    .first<{ active_booster_multiplier: number }>();
-  return row?.active_booster_multiplier ?? 1;
+    .bind(groupId, userId)
+    .first<BoosterRow>();
+  if (!row) return 1;
+
+  const event = await getActiveEventWindow(db, now);
+  const update = boosterStateUpdate(db, row, event, now);
+  if (update) {
+    await update.stmt.run();
+    // The state may have changed (paused or resumed) — trust the transition.
+    if (!update.state.alive) return 1;
+    if (update.state.paused) return 1;
+    return row.active_booster_multiplier;
+  }
+
+  if (row.booster_paused_at > 0) return 1; // frozen during an event
+  if (row.active_booster_until <= now) return 1; // expired
+  return row.active_booster_multiplier;
 }
 
 // ---------------------------------------------------------------------------

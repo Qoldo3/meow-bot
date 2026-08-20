@@ -566,6 +566,26 @@ function pickMeowTier(tiers: MeowTierConfig[]) {
   return tiers[tiers.length - 1];
 }
 
+/**
+ * Expected MP per meow (probability-weighted average of the tier ranges using
+ * the current config overrides, renormalized like pickMeowTier) and the
+ * expected hourly earning at the default 5-minute group cooldown.
+ */
+export async function computeMeowEarnings(db: D1Database): Promise<{ perMeow: number; perHour: number }> {
+  const tiers = await getMeowTierSettings(db);
+  const totalChance = tiers.reduce((sum, tier) => sum + tier.chance, 0);
+  if (totalChance <= 0) return { perMeow: 0, perHour: 0 };
+
+  let ev = 0;
+  for (const tier of tiers) {
+    const avgPoints = (tier.minPoints + tier.maxPoints) / 2;
+    ev += (tier.chance / totalChance) * avgPoints;
+  }
+  const perMeow = Math.round(ev * 100) / 100;
+  const meowsPerHour = 3600 / 300; // default group cooldown: 5 minutes
+  return { perMeow, perHour: Math.round(perMeow * meowsPerHour) };
+}
+
 function formatLotteryStatusText(settings: {
   lotteryEnabled: boolean;
   lotteryTicketPrice: number;
@@ -877,8 +897,10 @@ export async function handleMe(token: string, db: D1Database, env: Bindings, mes
       text += `🏅 عنوان: ${titleBadge(meTitle.name, meTitle.last_price, meTitle.emoji)}\n`;
     }
     if (booster) {
-      const mins = Math.ceil((booster.until - Math.floor(Date.now() / 1000)) / 60);
-      text += `🚀 بوستر: <b>${booster.multiplier}×</b> (${mins} دقیقه باقی‌مانده)\n`;
+      const mins = Math.ceil(booster.remaining / 60);
+      text += booster.paused
+        ? `🚀 بوستر: <b>${booster.multiplier}×</b> (⏸️ متوقف در طول رویداد — ${mins} دقیقه باقی‌مانده)\n`
+        : `🚀 بوستر: <b>${booster.multiplier}×</b> (${mins} دقیقه باقی‌مانده)\n`;
     }
   }
 
@@ -1129,9 +1151,11 @@ export async function handleBooster(token: string, db: D1Database, message: Tele
   text += `فقط روی میوهای این گروه تأثیر دارد.\n\n`;
 
   if (status) {
-    const remaining = status.until - Math.floor(Date.now() / 1000);
-    const mins = Math.ceil(remaining / 60);
-    text += `🟢 <b>بوستر فعال:</b> ${status.multiplier}× (باقی‌مانده: ${mins} دقیقه)\n\n`;
+    if (status.paused) {
+      text += `⏸️ <b>بوستر متوقف:</b> ${status.multiplier}× (در طول رویداد؛ باقی‌مانده: ${Math.ceil(status.remaining / 60)} دقیقه — بعد از پایان رویداد ادامه می‌یابد)\n\n`;
+    } else {
+      text += `🟢 <b>بوستر فعال:</b> ${status.multiplier}× (باقی‌مانده: ${Math.ceil(status.remaining / 60)} دقیقه)\n\n`;
+    }
   }
 
   text += `💰 موجودی گروه شما: <b>${await getGroupMemberBalance(db, groupId, userId)} MP</b>\n\n`;
@@ -1163,7 +1187,9 @@ export async function handleBoosterBuy(token: string, db: D1Database, callback: 
     return;
   }
 
-  await answerCallback(token, callback.id, `✅ بوستر <b>${tier.label}</b> فعال شد (${tier.multiplier}× برای ${tier.durationSec / 60} دقیقه).`);
+  await answerCallback(token, callback.id, result.paused
+    ? `✅ بوستر <b>${tier.label}</b> خریداری شد (${tier.multiplier}× برای ${tier.durationSec / 60} دقیقه). ⏸️ چون رویداد فعال است، زمان آن متوقف است و بعد از پایان رویداد شروع می‌شود.`
+    : `✅ بوستر <b>${tier.label}</b> فعال شد (${tier.multiplier}× برای ${tier.durationSec / 60} دقیقه).`);
 }
 
 export async function handleGroupStats(token: string, db: D1Database, message: TelegramMessage) {
