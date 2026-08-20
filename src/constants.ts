@@ -79,9 +79,10 @@ export interface BoosterTier {
 }
 
 export const BOOSTER_TIERS: BoosterTier[] = [
-  { id: "2x", label: "2× Meow", multiplier: 2, durationSec: 60 * 60, cost: 12_000, emoji: "🟢" },
-  { id: "4x", label: "4× Meow", multiplier: 4, durationSec: 60 * 60, cost: 20_000, emoji: "🔴" },
-  { id: "10x", label: "10× Meow", multiplier: 10, durationSec: 60 * 60, cost: 40_000, emoji: "💎" },
+  { id: "2x", label: "2× Meow", multiplier: 2, durationSec: 60 * 60, cost: 4_000, emoji: "🟢" },
+  { id: "4x", label: "4× Meow", multiplier: 4, durationSec: 60 * 60, cost: 8_000, emoji: "🟡" },
+  { id: "8x", label: "8× Meow", multiplier: 8, durationSec: 60 * 60, cost: 20_000, emoji: "🔴" },
+  { id: "12x", label: "12× Meow", multiplier: 12, durationSec: 60 * 60, cost: 32_000, emoji: "💎" },
 ];
 
 /** Minimum time between booster purchases (per user, per group). */
