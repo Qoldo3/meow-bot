@@ -425,6 +425,37 @@ async function cancelAuction(db: D1Database, a: AuctionRow, now: number) {
   ]);
 }
 
+/**
+ * Owner-only: cancel a live auction (refunds entry fees to participants and
+ * edits the board message). Returns a short status string for the caller.
+ * Reused by the owner panel (🏷️ auctions page) and the board's ❌ Cancel button.
+ */
+export async function cancelAuctionById(
+  token: string,
+  db: D1Database,
+  auctionId: number,
+  chatId: number
+): Promise<string> {
+  const a = await getAuction(db, auctionId);
+  if (!a || a.telegram_group_id !== chatId || a.status !== "open") {
+    return "❌ حراج فعال نیست.";
+  }
+  const claim = await db.prepare(`UPDATE title_auctions SET status = 'cancelling' WHERE id = ? AND status = 'open'`).bind(auctionId).run();
+  if (claim.meta.changes === 0) {
+    return "❌ حراج در حال پایان است.";
+  }
+  const claimedAuction = await getAuction(db, auctionId);
+  if (!claimedAuction) {
+    return "❌ حراج پیدا نشد.";
+  }
+  const title = await getTitle(db, claimedAuction.title_id);
+  await cancelAuction(db, claimedAuction, Math.floor(Date.now() / 1000));
+  if (a.board_message_id) {
+    await editMessageText(token, chatId, a.board_message_id, `❌ حراج عنوان <b>${escapeHtml(title?.name ?? "؟")}</b> توسط صاحب ربات لغو شد.\n\nورودی‌ها به شرکت‌کنندگان بازگردانده شد.`);
+  }
+  return "حراج لغو شد.";
+}
+
 /** Render a bot command inside a <code> block with angle brackets escaped, so
  *  Telegram's HTML parser doesn't mistake <تایتل …> for an (unsupported) tag. */
 const codeCmd = (t: string) => `<code>${escapeHtml(t)}</code>`;
@@ -886,27 +917,8 @@ export async function handleTitleCallback(token: string, db: D1Database, env: Bi
       await answerCallback(token, callback.id, "🚫 فقط صاحب ربات!", true);
       return;
     }
-    const a = await getAuction(db, auctionId);
-    if (!a || a.telegram_group_id !== chatId || a.status !== "open") {
-      await answerCallback(token, callback.id, "❌ حراج فعال نیست.", true);
-      return;
-    }
-    const claim = await db.prepare(`UPDATE title_auctions SET status = 'cancelling' WHERE id = ? AND status = 'open'`).bind(auctionId).run();
-    if (claim.meta.changes === 0) {
-      await answerCallback(token, callback.id, "❌ حراج در حال پایان است.", true);
-      return;
-    }
-    const claimedAuction = await getAuction(db, auctionId);
-    if (!claimedAuction) {
-      await answerCallback(token, callback.id, "❌ حراج پیدا نشد.", true);
-      return;
-    }
-    const title = await getTitle(db, claimedAuction.title_id);
-    await cancelAuction(db, claimedAuction, Math.floor(Date.now() / 1000));
-    if (a.board_message_id) {
-      await editMessageText(token, chatId, a.board_message_id, `❌ حراج عنوان <b>${escapeHtml(title?.name ?? "؟")}</b> توسط صاحب ربات لغو شد.\n\nورودی‌ها به شرکت‌کنندگان بازگردانده شد.`);
-    }
-    await answerCallback(token, callback.id, "حراج لغو شد.");
+    const msg = await cancelAuctionById(token, db, auctionId, chatId);
+    await answerCallback(token, callback.id, msg, msg.startsWith("❌"));
     return;
   }
 

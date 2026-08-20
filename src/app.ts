@@ -32,7 +32,7 @@ import {
 import { handlePokerCommand, handlePokerReplyCancel } from "./pokerHandlers";
 import { handleBlackjackCommand, handleBlackjackReplyCancel } from "./blackjackHandlers";
 import { handleTitle, handleTitleReplyBid, titleBadge } from "./titleAuction";
-import { OWNER_COMMANDS, handleOwnerUserInfo, isOwner } from "./owner";
+import { OWNER_COMMANDS, handleOwnerUserInfo, handleOwnerPendingText, isOwner } from "./owner";
 import { isUserBanned, isMaintenanceMode, getGroupSettings, getGroupMemberBalance, getActiveTitle } from "./database";
 import { telegramRequest, sendMessage } from "./telegram";
 import { escapeHtml, isMeow, formatDuration, parseReplyAction, tehranHour } from "./utils";
@@ -82,6 +82,11 @@ app.post("/telegram/webhook", async (c) => {
 
     if (OWNER_COMMANDS[command]) {
       await OWNER_COMMANDS[command](token, db, c.env, message);
+      return c.json({ ok: true });
+    }
+
+    // Owner-only private-chat flows: pending user search / broadcast draft.
+    if (await handleOwnerPendingText(token, db, c.env, message, text)) {
       return c.json({ ok: true });
     }
     if (command === "/settings") {

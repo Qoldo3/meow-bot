@@ -1,6 +1,12 @@
 export const DUEL_TIMEOUT_SEC = 60;
 export const DICE_COOLDOWN_SEC = 5 * 60;
 export const BROADCAST_PAGE_SIZE = 100;
+/** Broadcasts send at most this many messages per invocation. Free plan caps
+ * D1 at 50 queries AND outbound subrequests at 50 per invocation, and each
+ * Telegram send is one subrequest — keep the chunk well under both limits. */
+export const BROADCAST_CHUNK_SIZE = 40;
+/** Pause between broadcast chunks so Telegram rate limits don't kick in. */
+export const BROADCAST_CHUNK_SLEEP_MS = 1000;
 export const MAX_AMOUNT = 1_000_000_000;
 
 export const POKER_MIN_BUYIN = 10_000;

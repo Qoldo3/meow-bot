@@ -507,7 +507,7 @@ async function getActiveEvent(db: D1Database, env: Bindings): Promise<ActiveEven
   return activeEvent;
 }
 
-async function invalidateActiveEventCache(env: Bindings) {
+export async function invalidateActiveEventCache(env: Bindings) {
   if (!env.CACHE) return;
   await env.CACHE.delete(ACTIVE_EVENT_CACHE_KEY);
 }
@@ -2080,7 +2080,7 @@ export async function handleCallbackQuery(
     return;
   }
 
-  if (action === "admin" || action === "useract" || action === "bc" || action === "groupmgr" || action === "duelmon" || action === "audit") {
+  if (action === "admin" || action === "useract" || action === "bc" || action === "groupmgr" || action === "duelmon" || action === "audit" || action === "repair" || action === "auctionmgr" || action === "cfg") {
     await handleOwnerPanelAction(token, db, env, callback, action, params);
     return;
   }

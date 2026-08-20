@@ -533,6 +533,19 @@ export async function findUserById(db: D1Database, userId: number) {
     .first<{ telegram_id: number; username: string | null; first_name: string; meow_points: number; total_meows: number; created_at: number }>();
 }
 
+export function escapeLike(query: string): string {
+  return query.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+}
+
+/** Fuzzy search over user name/username (owner panel search). */
+export async function searchUsers(db: D1Database, query: string, limit: number = 10) {
+  const like = `%${escapeLike(query)}%`;
+  return db
+    .prepare(`SELECT telegram_id, first_name, username FROM users WHERE first_name LIKE ? ESCAPE '\\' OR username LIKE ? ESCAPE '\\' ORDER BY meow_points DESC LIMIT ?`)
+    .bind(like, like, limit)
+    .all<{ telegram_id: number; first_name: string; username: string | null }>();
+}
+
 export async function getDuelRating(db: D1Database, userId: number, groupId?: number): Promise<number> {
   if (groupId != null) {
     const row = await db.prepare(`SELECT duel_rating FROM group_members WHERE telegram_group_id = ? AND telegram_user_id = ?`).bind(groupId, userId).first<{ duel_rating: number }>();

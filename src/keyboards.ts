@@ -52,34 +52,49 @@ export function postMeowKeyboard(groupId: number, userId?: number) {
 }
 
 export function ownerPanelKeyboard(userId?: number) {
-  const userSuffix = getUserSuffix(userId);
+  const u = getUserSuffix(userId);
   return {
     inline_keyboard: [
+      [{ text: "📊 آمار ربات", callback_data: `admin:stats${u}` }],
       [
-        { text: "📊 آمار ربات", callback_data: `admin:stats${userSuffix}` },
-        { text: "📢 پیام همگانی", callback_data: `admin:broadcast${userSuffix}` },
+        { text: "👤 کاربران", callback_data: `admin:users${u}` },
+        { text: "👥 گروه‌ها", callback_data: `admin:groups${u}` },
+        { text: "⚔️ دعواها", callback_data: `admin:duels${u}` },
       ],
       [
-        { text: "👥 گروه‌ها", callback_data: `admin:groups${userSuffix}` },
-        { text: "⚔️ دعواها", callback_data: `admin:duels${userSuffix}` },
+        { text: "🎉 رویدادها", callback_data: `admin:events${u}` },
+        { text: "🏷️ حراج‌های عنوان", callback_data: `admin:auctions${u}` },
+        { text: "💰 اقتصاد", callback_data: `admin:economy${u}` },
       ],
       [
-        { text: "📝 تراکنش‌ها", callback_data: `admin:audit${userSuffix}` },
-        { text: "⚙️ تنظیمات", callback_data: `admin:config${userSuffix}` },
+        { text: "📝 تراکنش‌ها", callback_data: `admin:audit${u}` },
+        { text: "⚙️ تنظیمات", callback_data: `admin:config${u}` },
+        { text: "🔍 تعمیرات", callback_data: `admin:repair${u}` },
       ],
       [
-        { text: "➕ افزودن امتیاز", callback_data: `admin:addpoints${userSuffix}` },
-        { text: "➖ کسر امتیاز", callback_data: `admin:removepoints${userSuffix}` },
+        { text: "📢 پیام همگانی", callback_data: `admin:broadcast${u}` },
+        { text: "🔋 حالت تعمیرات", callback_data: `admin:maintenance${u}` },
+      ],
+      [{ text: "🔙 بستن پنل", callback_data: `menu:close${u}` }],
+    ],
+  };
+}
+
+export function usersMenuKeyboard(userId?: number) {
+  const u = getUserSuffix(userId);
+  return {
+    inline_keyboard: [
+      [{ text: "🔍 جستجوی کاربر", callback_data: `admin:search${u}` }],
+      [
+        { text: "➕ افزودن امتیاز", callback_data: `admin:addpoints${u}` },
+        { text: "➖ کسر امتیاز", callback_data: `admin:removepoints${u}` },
       ],
       [
-        { text: "🔄 ریست کاربر", callback_data: `admin:resetuser${userSuffix}` },
-        { text: "🔧 تعمیرات", callback_data: `admin:maintenance${userSuffix}` },
+        { text: "🚫 بن / آنبن", callback_data: `admin:banmenu${u}` },
+        { text: "🔄 ریست کاربر", callback_data: `admin:resetuser${u}` },
       ],
-      [
-        { text: "👤 اطلاعات کاربر", callback_data: `admin:userinfo${userSuffix}` },
-        { text: "🚫 بن/آنبن", callback_data: `admin:banmenu${userSuffix}` },
-      ],
-      [{ text: "🔙 بستن پنل", callback_data: `menu:close${userSuffix}` }],
+      [{ text: "📜 تراکنش‌های کاربر", callback_data: `admin:useraudit${u}` }],
+      [{ text: "🔙 پنل ادمین", callback_data: `menu:admin${u}` }],
     ],
   };
 }
@@ -172,42 +187,92 @@ export function duelKeyboard(duelId: string, targetId?: number, challengerId?: n
   return { inline_keyboard: buttons };
 }
 
-export function userActionKeyboard(userId: number, ownerId?: number) {
-  const userSuffix = getUserSuffix(ownerId);
+export function userActionKeyboard(userId: number, ownerId?: number, confirmingReset = false) {
+  const u = getUserSuffix(ownerId);
+  if (confirmingReset) {
+    return {
+      inline_keyboard: [
+        [{ text: "⚠️ مطمئنی؟ امتیاز، عضویت و همه تراکنش‌ها پاک می‌شود!" }],
+        [
+          { text: "✅ بله، ریست کن", callback_data: `useract:reset:yes:${userId}${u}` },
+          { text: "❌ انصراف", callback_data: `useract:reset:no:${userId}${u}` },
+        ],
+      ],
+    };
+  }
   return {
     inline_keyboard: [
       [
-        { text: "➕ +100", callback_data: `useract:add:${userId}:100${userSuffix}` },
-        { text: "➕ +500", callback_data: `useract:add:${userId}:500${userSuffix}` },
-        { text: "➕ +1000", callback_data: `useract:add:${userId}:1000${userSuffix}` },
+        { text: "➕ +100", callback_data: `useract:add:${userId}:100${u}` },
+        { text: "➕ +500", callback_data: `useract:add:${userId}:500${u}` },
+        { text: "➕ +1000", callback_data: `useract:add:${userId}:1000${u}` },
       ],
       [
-        { text: "➖ -100", callback_data: `useract:sub:${userId}:100${userSuffix}` },
-        { text: "➖ -500", callback_data: `useract:sub:${userId}:500${userSuffix}` },
-        { text: "➖ -1000", callback_data: `useract:sub:${userId}:1000${userSuffix}` },
+        { text: "➖ -100", callback_data: `useract:sub:${userId}:100${u}` },
+        { text: "➖ -500", callback_data: `useract:sub:${userId}:500${u}` },
+        { text: "➖ -1000", callback_data: `useract:sub:${userId}:1000${u}` },
       ],
       [
-        { text: "🚫 بن", callback_data: `useract:ban:${userId}:0${userSuffix}` },
-        { text: "✅ آنبن", callback_data: `useract:unban:${userId}:0${userSuffix}` },
-        { text: "🔄 ریست", callback_data: `useract:reset:${userId}:0${userSuffix}` },
+        { text: "🚫 بن", callback_data: `useract:ban:${userId}${u}` },
+        { text: "✅ آنبن", callback_data: `useract:unban:${userId}${u}` },
+        { text: "🔄 ریست", callback_data: `useract:reset:${userId}${u}` },
       ],
       [
-        { text: "📜 تراکنش‌ها", callback_data: `useract:txns:${userId}:0${userSuffix}` },
-        { text: "🔙 پنل ادمین", callback_data: `menu:admin${userSuffix}` },
+        { text: "📜 تراکنش‌ها", callback_data: `useract:txns:${userId}${u}` },
+        { text: "🔙 پنل ادمین", callback_data: `menu:admin${u}` },
       ],
     ],
   };
 }
 
-export function broadcastConfirmKeyboard(userId?: number) {
-  const userSuffix = getUserSuffix(userId);
+export function userSearchResultsKeyboard(results: { telegram_id: number; first_name: string; username: string | null }[], ownerId?: number) {
+  const u = getUserSuffix(ownerId);
+  return {
+    inline_keyboard: [
+      ...results.map((r) => [
+        { text: `👤 ${r.first_name}${r.username ? ` @${r.username}` : ""} (#${r.telegram_id})`, callback_data: `useract:open:${r.telegram_id}${u}` },
+      ]),
+      [{ text: "🔙 پنل ادمین", callback_data: `menu:admin${u}` }],
+    ],
+  };
+}
+
+export function broadcastModeKeyboard(userId?: number) {
+  const u = getUserSuffix(userId);
   return {
     inline_keyboard: [
       [
-        { text: "✅ ارسال به همه", callback_data: `bc:confirm${userSuffix}` },
-        { text: "❌ لغو", callback_data: `bc:cancel${userSuffix}` },
+        { text: "👤 ارسال به کاربران", callback_data: `admin:broadcast:users${u}` },
+        { text: "👥 ارسال به گروه‌ها", callback_data: `admin:broadcast:groups${u}` },
+      ],
+      [{ text: "🔙 پنل ادمین", callback_data: `menu:admin${u}` }],
+    ],
+  };
+}
+
+export function broadcastConfirmKeyboard(userId?: number) {
+  const u = getUserSuffix(userId);
+  return {
+    inline_keyboard: [
+      [
+        { text: "✅ ارسال", callback_data: `bc:confirm${u}` },
+        { text: "❌ لغو", callback_data: `bc:cancel${u}` },
       ],
     ],
+  };
+}
+
+export function broadcastProgressKeyboard(userId?: number, done = false) {
+  const u = getUserSuffix(userId);
+  return {
+    inline_keyboard: done
+      ? [[{ text: "🔙 پنل ادمین", callback_data: `menu:admin${u}` }]]
+      : [
+          [
+            { text: "▶️ ادامه", callback_data: `bc:continue${u}` },
+            { text: "❌ توقف", callback_data: `bc:stop${u}` },
+          ],
+        ],
   };
 }
 
@@ -233,15 +298,141 @@ export function eventInlineKeyboard(isOwner: boolean, hasActiveEvent: boolean, u
   return { inline_keyboard: buttons };
 }
 
-export function txnAuditKeyboard(page: number, userId?: number) {
-  const userSuffix = getUserSuffix(userId);
+export function txnAuditKeyboard(page: number, userId?: number, filter = "") {
+  const u = getUserSuffix(userId);
+  const f = filter ? `:${filter}` : "";
   return {
     inline_keyboard: [
       [
-        { text: "⬅️ قبلی", callback_data: `audit:page:${Math.max(0, page - 1)}${userSuffix}` },
-        { text: "➡️ بعدی", callback_data: `audit:page:${page + 1}${userSuffix}` },
+        { text: "⬅️ قبلی", callback_data: `audit:page:${Math.max(0, page - 1)}${f}${u}` },
+        { text: "➡️ بعدی", callback_data: `audit:page:${page + 1}${f}${u}` },
       ],
-      [{ text: "🔙 پنل ادمین", callback_data: `menu:admin${userSuffix}` }],
+      ...(filter ? [[{ text: "🔍 پاک کردن فیلتر", callback_data: `audit:page:0${u}` }]] : []),
+      [{ text: "🔙 پنل ادمین", callback_data: `menu:admin${u}` }],
+    ],
+  };
+}
+
+export function groupPageKeyboard(groupId: number, page: number, isActive: boolean, userId?: number) {
+  const u = getUserSuffix(userId);
+  return {
+    inline_keyboard: [
+      [
+        { text: `🤖 ${isActive ? "✅ فعال" : "❌ غیرفعال"}`, callback_data: `groupmgr:toggle:${groupId}:${page}${u}` },
+        { text: "⏱️ کول‌داون", callback_data: `groupmgr:cooldown:${groupId}:${page}${u}` },
+      ],
+      [
+        { text: "🎟️ لاتاری", callback_data: `groupmgr:lottery:${groupId}:${page}${u}` },
+        { text: "🔄 رفرش لیدربورد", callback_data: `groupmgr:refresh:${groupId}:${page}${u}` },
+      ],
+      [
+        { text: "🗑️ ریست لیدربورد", callback_data: `groupmgr:reset:${groupId}:${page}${u}` },
+        { text: "🗑️ حذف گروه", callback_data: `groupmgr:delete:${groupId}:${page}${u}` },
+      ],
+      [
+        { text: "⬅️ بازگشت به گروه‌ها", callback_data: `groupmgr:page:${page}${u}` },
+        { text: "🔙 پنل ادمین", callback_data: `menu:admin${u}` },
+      ],
+    ],
+  };
+}
+
+export function groupResetConfirmKeyboard(groupId: number, page: number, userId?: number) {
+  const u = getUserSuffix(userId);
+  return {
+    inline_keyboard: [
+      [{ text: "⚠️ مطمئنی؟ کل لیدربورد گروه پاک می‌شود!" }],
+      [
+        { text: "✅ بله، ریست کن", callback_data: `groupmgr:reset:yes:${groupId}:${page}${u}` },
+        { text: "❌ انصراف", callback_data: `groupmgr:reset:no:${groupId}:${page}${u}` },
+      ],
+    ],
+  };
+}
+
+export function groupDeleteConfirmKeyboard(groupId: number, page: number, userId?: number) {
+  const u = getUserSuffix(userId);
+  return {
+    inline_keyboard: [
+      [{ text: "⚠️ مطمئنی؟ گروه و همه داده‌هایش حذف می‌شود!" }],
+      [
+        { text: "✅ بله، حذف کن", callback_data: `groupmgr:delete:yes:${groupId}:${page}${u}` },
+        { text: "❌ انصراف", callback_data: `groupmgr:delete:no:${groupId}:${page}${u}` },
+      ],
+    ],
+  };
+}
+
+export function groupLotteryKeyboard(groupId: number, page: number, userId?: number) {
+  const u = getUserSuffix(userId);
+  return {
+    inline_keyboard: [
+      [
+        { text: "🎟️ قیمت +50", callback_data: `groupmgr:lprice:${groupId}:${page}:50${u}` },
+        { text: "🎟️ قیمت -50", callback_data: `groupmgr:lprice:${groupId}:${page}:-50${u}` },
+      ],
+      [
+        { text: "💰 پات +100", callback_data: `groupmgr:lpot:${groupId}:${page}:100${u}` },
+        { text: "💰 پات -100", callback_data: `groupmgr:lpot:${groupId}:${page}:-100${u}` },
+      ],
+      [
+        { text: "⬅️ بازگشت", callback_data: `groupmgr:view:${groupId}:${page}${u}` },
+        { text: "🔙 پنل ادمین", callback_data: `menu:admin${u}` },
+      ],
+    ],
+  };
+}
+
+export function repairKeyboard(userId?: number) {
+  const u = getUserSuffix(userId);
+  return {
+    inline_keyboard: [
+      [
+        { text: "🔧 رفع اختلاف امتیازها", callback_data: `repair:fix${u}` },
+        { text: "🏷️ بازسازی بج", callback_data: `repair:refreshbadge${u}` },
+      ],
+      [{ text: "🔙 پنل ادمین", callback_data: `menu:admin${u}` }],
+    ],
+  };
+}
+
+export function auctionListKeyboard(rows: { id: number; name: string }[], page: number, hasMore: boolean, userId?: number) {
+  const u = getUserSuffix(userId);
+  return {
+    inline_keyboard: [
+      ...rows.map((r) => [
+        { text: `❌ لغو: ${r.name} (#${r.id})`, callback_data: `auctionmgr:cancel:${r.id}:${page}${u}` },
+      ]),
+      [
+        { text: "⬅️ قبلی", callback_data: `auctionmgr:page:${Math.max(0, page - 1)}${u}` },
+        { text: "➡️ بعدی", callback_data: `auctionmgr:page:${hasMore ? page + 1 : page}${u}` },
+      ],
+      [{ text: "🔙 پنل ادمین", callback_data: `menu:admin${u}` }],
+    ],
+  };
+}
+
+export function configPageKeyboard(entries: { key: string; label: string; value: string; type: "int" | "float" }[], page: number, totalPages: number, userId?: number) {
+  const u = getUserSuffix(userId);
+  const steps = (type: "int" | "float") => (type === "int" ? [1, 10] : [0.01, 0.05]);
+  return {
+    inline_keyboard: [
+      ...entries.map((e) => {
+        const [s1, s2] = steps(e.type);
+        return [
+          { text: `${e.label.slice(0, 22)}: ${e.value}`, callback_data: `cfg:none${u}` },
+          { text: `−${s1}`, callback_data: `cfg:adj:${e.key}:${-s1}${u}` },
+          { text: `+${s1}`, callback_data: `cfg:adj:${e.key}:${s1}${u}` },
+          { text: `−${s2}`, callback_data: `cfg:adj:${e.key}:${-s2}${u}` },
+          { text: `+${s2}`, callback_data: `cfg:adj:${e.key}:${s2}${u}` },
+        ];
+      }),
+      [
+        { text: "⬅️ قبلی", callback_data: `cfg:page:${Math.max(0, page - 1)}${u}` },
+        { text: `${page + 1}/${totalPages}`, callback_data: `cfg:none${u}` },
+        { text: "➡️ بعدی", callback_data: `cfg:page:${Math.min(totalPages - 1, page + 1)}${u}` },
+      ],
+      [{ text: "🔙 پنل ادمین", callback_data: `menu:admin${u}` }],
     ],
   };
 }

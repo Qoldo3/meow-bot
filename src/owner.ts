@@ -3,17 +3,28 @@ import {
   answerCallback,
   editMessageText,
   telegramRequest,
-  isGroupAdmin,
 } from "./telegram";
 import {
   ownerPanelKeyboard,
+  usersMenuKeyboard,
   userActionKeyboard,
+  userSearchResultsKeyboard,
   broadcastConfirmKeyboard,
+  broadcastModeKeyboard,
+  broadcastProgressKeyboard,
   txnAuditKeyboard,
+  groupPageKeyboard,
+  groupResetConfirmKeyboard,
+  groupDeleteConfirmKeyboard,
+  groupLotteryKeyboard,
+  repairKeyboard,
+  configPageKeyboard,
+  eventInlineKeyboard,
 } from "./keyboards";
 import {
   findUserByUsername,
   findUserById,
+  searchUsers,
   isUserBanned,
   getUserTransactions,
   getUserGroupMemberships,
@@ -27,6 +38,7 @@ import {
   getDuel,
   deleteDuel,
 } from "./duel";
+import { cancelAuctionById } from "./titleAuction";
 import {
   escapeHtml,
   safeParseAmount,
@@ -35,13 +47,19 @@ import {
   formatTehranDate,
   formatTehranTime,
   toEnglishNumbers,
+  tehranDayStart,
+  formatDuration,
 } from "./utils";
 import {
   Bindings,
   TelegramCallbackQuery,
   TelegramMessage,
 } from "./types";
-import { BROADCAST_PAGE_SIZE, DUEL_TIMEOUT_SEC } from "./constants";
+import {
+  BROADCAST_CHUNK_SIZE,
+  BROADCAST_CHUNK_SLEEP_MS,
+  DUEL_TIMEOUT_SEC,
+} from "./constants";
 
 export function isOwner(env: Bindings, userId: number | null | undefined): boolean {
   return !!userId && env.BOT_OWNER_ID === String(userId);
@@ -53,7 +71,7 @@ async function requireOwner(token: string, env: Bindings, message: TelegramMessa
   return false;
 }
 
-const OWNER_CONFIG_SETTINGS = [
+const OWNER_CONFIG_SETTINGS: { key: string; label: string; type: "int" | "float"; defaultValue: string }[] = [
   { key: "meow_street_min", label: "گربه‌ی خیابونی: حداقل امتیاز", type: "int", defaultValue: "1" },
   { key: "meow_street_max", label: "گربه‌ی خیابونی: حداکثر امتیاز", type: "int", defaultValue: "200" },
   { key: "meow_street_chance", label: "گربه‌ی خیابونی: احتمال", type: "float", defaultValue: "0.33" },
@@ -77,91 +95,478 @@ const OWNER_CONFIG_SETTINGS = [
   { key: "meow_galaxy_chance", label: "گربه‌ی کهکشانی: احتمال", type: "float", defaultValue: "0.0005" },
 ];
 
+/** Resolve a user by numeric ID (any digit script) or @username. */
+export async function resolveUserByIdOrUsername(db: D1Database, raw: string) {
+  const cleaned = toEnglishNumbers(raw).trim();
+  let user: Awaited<ReturnType<typeof findUserById>> = null;
+  let byId = false;
+  if (/^\d+$/.test(cleaned)) {
+    byId = true;
+    user = await findUserById(db, parseInt(cleaned, 10));
+  } else {
+    const found = await findUserByUsername(db, normalizeUsername(cleaned));
+    if (found) user = await findUserById(db, found.telegram_id);
+  }
+  return { user, byId };
+}
+
+function broadcastModeKey(userId: number) {
+  return `broadcast_mode:${userId}`;
+}
+function broadcastCursorKey(userId: number) {
+  return `broadcast_cursor:${userId}`;
+}
+function broadcastPendingKey(userId: number) {
+  return `broadcast_pending:${userId}`;
+}
+function ownerSearchKey(userId: number) {
+  return `owner_search:${userId}`;
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard & panel pages
+// ---------------------------------------------------------------------------
+
 export async function handleAdmin(token: string, _db: D1Database, env: Bindings, message: TelegramMessage) {
   if (!(await requireOwner(token, env, message, true))) return;
 
-  const stats = await env.DB.prepare(`SELECT COUNT(*) as count FROM users`).first<{ count: number }>();
-  const groups = await env.DB.prepare(`SELECT COUNT(*) as count FROM telegram_groups WHERE is_active = 1`).first<{ count: number }>();
-  const totalGroups = await env.DB.prepare(`SELECT COUNT(*) as count FROM telegram_groups`).first<{ count: number }>();
+  // The owner panel only makes sense in the owner's private chat with the bot.
+  if (message.chat.type !== "private") {
+    await sendMessage(token, message.chat.id, "🐱 پنل ادمین فقط در چت خصوصی با ربات در دسترس است!");
+    return;
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  const dayStart = tehranDayStart(now);
+  const [users, groups, totalGroups, circulation, treasuries, pots, today, activeEvents, openAuctions, pendingDuels, maintenance] = await env.DB.batch([
+    env.DB.prepare(`SELECT COUNT(*) as c FROM users`),
+    env.DB.prepare(`SELECT COUNT(*) as c FROM telegram_groups WHERE is_active = 1`),
+    env.DB.prepare(`SELECT COUNT(*) as c FROM telegram_groups`),
+    env.DB.prepare(`SELECT COALESCE(SUM(meow_points), 0) as c FROM users`),
+    env.DB.prepare(`SELECT COALESCE(SUM(treasury_balance), 0) as c FROM telegram_groups`),
+    env.DB.prepare(`SELECT COALESCE(SUM(lottery_pot), 0) as c FROM telegram_groups`),
+    env.DB.prepare(`SELECT COUNT(*) as c FROM transactions WHERE reason = 'MEOW' AND created_at >= ?`).bind(dayStart),
+    env.DB.prepare(`SELECT COUNT(*) as c FROM events WHERE is_active = 1 AND start_at <= ? AND end_at >= ?`).bind(now, now),
+    env.DB.prepare(`SELECT COUNT(*) as c FROM title_auctions WHERE status = 'open'`),
+    env.DB.prepare(`SELECT COUNT(*) as c FROM active_duels WHERE status = 'pending'`),
+    env.DB.prepare(`SELECT value FROM bot_settings WHERE key = 'maintenance'`),
+  ]);
+
+  const n = (r: any) => r?.results?.[0]?.c ?? 0;
+  const s = (r: any) => r?.results?.[0]?.value ?? "";
+  const maintenanceOn = s(maintenance) === "1";
 
   const text =
     `🛡️ <b>Owner Panel</b>\n\n` +
-    `👤 کاربران: <b>${stats?.count ?? 0}</b>\n` +
-    `👥 گروه‌های فعال: <b>${groups?.count ?? 0}</b>\n` +
-    `👥 کل گروه‌ها: <b>${totalGroups?.count ?? 0}</b>\n\n` +
+    `👤 کاربران: <b>${n(users)}</b>\n` +
+    `👥 گروه‌های فعال: <b>${n(groups)}</b> / ${n(totalGroups)}\n` +
+    `💰 در گردش: <b>${Number(n(circulation)).toLocaleString("en-US")} MP</b>\n` +
+    `🏦 خزانه‌ها: <b>${Number(n(treasuries)).toLocaleString("en-US")} MP</b>\n` +
+    `🎟️ پات لاتاری: <b>${Number(n(pots)).toLocaleString("en-US")} MP</b>\n` +
+    `🐾 میوهای امروز: <b>${n(today)}</b>\n` +
+    `🎯 رویداد فعال: <b>${n(activeEvents)}</b> | ` +
+    `🏷️ حراج باز: <b>${n(openAuctions)}</b> | ` +
+    `⚔️ دعوای در انتظار: <b>${n(pendingDuels)}</b>\n` +
+    `🔧 تعمیرات: <b>${maintenanceOn ? "🔴 روشن" : "🟢 خاموش"}</b>\n\n` +
     `از دکمه‌ها استفاده کن:`;
 
   await sendMessage(token, message.chat.id, text, { reply_markup: ownerPanelKeyboard(message.from?.id) });
 }
 
-export async function handleOwnerBroadcast(token: string, db: D1Database, env: Bindings, message: TelegramMessage) {
-  if (!(await requireOwner(token, env, message))) return;
-  const text = (message.text || "").replace(/^\/broadcast\s*/, "");
-  if (!text) {
-    await sendMessage(token, message.chat.id, "🐱 نحوه استفاده: /broadcast پیام شما");
+async function renderStatsPage(token: string, db: D1Database, chatId: number, messageId: number, userId: number) {
+  const now = Math.floor(Date.now() / 1000);
+  const dayStart = tehranDayStart(now);
+  const [users, groups, totalGroups, circulation, treasuries, pots, today, activeEvents, openAuctions, pendingDuels, maintenance] = await db.batch([
+    db.prepare(`SELECT COUNT(*) as c FROM users`),
+    db.prepare(`SELECT COUNT(*) as c FROM telegram_groups WHERE is_active = 1`),
+    db.prepare(`SELECT COUNT(*) as c FROM telegram_groups`),
+    db.prepare(`SELECT COALESCE(SUM(meow_points), 0) as c FROM users`),
+    db.prepare(`SELECT COALESCE(SUM(treasury_balance), 0) as c FROM telegram_groups`),
+    db.prepare(`SELECT COALESCE(SUM(lottery_pot), 0) as c FROM telegram_groups`),
+    db.prepare(`SELECT COUNT(*) as c FROM transactions WHERE reason = 'MEOW' AND created_at >= ?`).bind(dayStart),
+    db.prepare(`SELECT COUNT(*) as c FROM events WHERE is_active = 1 AND start_at <= ? AND end_at >= ?`).bind(now, now),
+    db.prepare(`SELECT COUNT(*) as c FROM title_auctions WHERE status = 'open'`),
+    db.prepare(`SELECT COUNT(*) as c FROM active_duels WHERE status = 'pending'`),
+    db.prepare(`SELECT value FROM bot_settings WHERE key = 'maintenance'`),
+  ]);
+
+  const n = (r: any) => r?.results?.[0]?.c ?? 0;
+  const s = (r: any) => r?.results?.[0]?.value ?? "";
+  const maintenanceOn = s(maintenance) === "1";
+  const text =
+    `📊 <b>آمار ربات</b>\n\n` +
+    `👤 کاربران: <b>${n(users)}</b>\n` +
+    `👥 گروه‌های فعال: <b>${n(groups)}</b> / ${n(totalGroups)}\n` +
+    `💰 امتیاز در گردش: <b>${Number(n(circulation)).toLocaleString("en-US")} MP</b>\n` +
+    `🏦 مجموع خزانه‌ها: <b>${Number(n(treasuries)).toLocaleString("en-US")} MP</b>\n` +
+    `🎟️ مجموع پات لاتاری: <b>${Number(n(pots)).toLocaleString("en-US")} MP</b>\n` +
+    `🐾 میوهای امروز: <b>${n(today)}</b>\n` +
+    `🎯 رویداد فعال: <b>${n(activeEvents)}</b>\n` +
+    `🏷️ حراج‌های باز: <b>${n(openAuctions)}</b>\n` +
+    `⚔️ دعواهای در انتظار: <b>${n(pendingDuels)}</b>\n` +
+    `🔧 حالت تعمیرات: <b>${maintenanceOn ? "🔴 روشن" : "🟢 خاموش"}</b>`;
+
+  await editMessageText(token, chatId, messageId, text, ownerPanelKeyboard(userId));
+}
+
+async function renderEconomyPage(token: string, db: D1Database, chatId: number, messageId: number, userId: number) {
+  const now = Math.floor(Date.now() / 1000);
+  const dayStart = tehranDayStart(now);
+  const [economy, topUsers] = await db.batch([
+    db.prepare(`
+      SELECT
+        (SELECT COALESCE(SUM(meow_points), 0) FROM users) as circulation,
+        (SELECT COALESCE(SUM(treasury_balance), 0) FROM telegram_groups) as treasuries,
+        (SELECT COALESCE(SUM(lottery_pot), 0) FROM telegram_groups) as pots,
+        (SELECT COUNT(*) FROM transactions) as txns,
+        (SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE created_at >= ?) as today_points,
+        (SELECT COUNT(*) FROM transactions WHERE reason = 'MEOW' AND created_at >= ?) as today_meows
+    `).bind(dayStart, dayStart),
+    db.prepare(`SELECT telegram_id, first_name, username, meow_points FROM users ORDER BY meow_points DESC LIMIT 5`),
+  ]);
+
+  const e = (economy.results?.[0] ?? {}) as Record<string, number>;
+  let text =
+    `💰 <b>اقتصاد ربات</b>\n\n` +
+    `💵 امتیاز در گردش: <b>${(e.circulation ?? 0).toLocaleString("en-US")} MP</b>\n` +
+    `🏦 مجموع خزانه‌ها: <b>${(e.treasuries ?? 0).toLocaleString("en-US")} MP</b>\n` +
+    `🎟️ مجموع پات لاتاری: <b>${(e.pots ?? 0).toLocaleString("en-US")} MP</b>\n` +
+    `🧾 کل تراکنش‌ها: <b>${(e.txns ?? 0).toLocaleString("en-US")}</b>\n` +
+    `⚡ امتیاز امروز: <b>${(e.today_points ?? 0).toLocaleString("en-US")} MP</b>\n` +
+    `🐾 میوهای امروز: <b>${e.today_meows ?? 0}</b>\n\n` +
+    `🏆 <b>۵ کاربر ثروتمند:</b>\n`;
+
+  const topRows = (topUsers.results ?? []) as { telegram_id: number; first_name: string; username: string | null; meow_points: number }[];
+  if (!topRows.length) text += "هیچ کاربری نیست.";
+  topRows.forEach((u, i) => {
+    text += `${i + 1}. ${escapeHtml(u.first_name)} — <b>${u.meow_points.toLocaleString("en-US")} MP</b>\n`;
+  });
+
+  const keyboard = {
+    inline_keyboard: [
+      ...topRows.map((u) => [{ text: `👤 ${escapeHtml(u.first_name).slice(0, 20)} (#${u.telegram_id})`, callback_data: `useract:open:${u.telegram_id}:user:${userId}` }]),
+      [{ text: "🔙 پنل ادمین", callback_data: `menu:admin:user:${userId}` }],
+    ],
+  };
+  await editMessageText(token, chatId, messageId, text, keyboard);
+}
+
+async function renderEventsPage(token: string, db: D1Database, env: Bindings, chatId: number, messageId: number, userId: number) {
+  const now = Math.floor(Date.now() / 1000);
+  const activeEvent = await db
+    .prepare(`SELECT title, description, bonus_multiplier, end_at FROM events WHERE is_active = 1 AND start_at <= ? AND end_at >= ? ORDER BY created_at DESC LIMIT 1`)
+    .bind(now, now)
+    .first<{ title: string; description: string; bonus_multiplier: number; end_at: number }>();
+
+  let text = `🎉 <b>مدیریت رویدادها</b>\n\n`;
+  if (activeEvent) {
+    const remaining = formatDuration(activeEvent.end_at > now ? activeEvent.end_at - now : 0);
+    text +=
+      `🎯 رویداد فعلی: <b>${escapeHtml(activeEvent.title)}</b>\n` +
+      `${escapeHtml(activeEvent.description)}\n` +
+      `💥 ضریب: x${activeEvent.bonus_multiplier}\n` +
+      `⏳ تا پایان: <b>${remaining}</b>`;
+  } else {
+    text += `✨ فعلاً رویداد فعالی وجود ندارد.\n\nبرای افزودن:\n<code>/add event نام ضریب دقیقه</code>\nمثال: <code>/add event FlashSale 2 60</code>`;
+  }
+
+  await editMessageText(token, chatId, messageId, text, eventInlineKeyboard(true, !!activeEvent, userId));
+}
+
+async function renderAuctionsPage(token: string, db: D1Database, chatId: number, messageId: number, userId: number, page = 0) {
+  const perPage = 5;
+  const offset = page * perPage;
+  const now = Math.floor(Date.now() / 1000);
+  const rows = await db.prepare(`
+    SELECT a.id, a.telegram_group_id, a.current_bid, a.start_amount, a.created_at, a.ends_at, t.name
+    FROM title_auctions a
+    LEFT JOIN titles t ON t.id = a.title_id
+    WHERE a.status = 'open'
+    ORDER BY a.created_at DESC
+    LIMIT ? OFFSET ?
+  `).bind(perPage + 1, offset).all<{
+    id: number; telegram_group_id: number; current_bid: number | null;
+    start_amount: number; created_at: number; ends_at: number | null; name: string | null;
+  }>();
+
+  if (!rows.results.length) {
+    await editMessageText(token, chatId, messageId, "🏷️ <b>حراج‌های عنوان</b>\n\nهیچ حراج باز وجود ندارد.", ownerPanelKeyboard(userId));
     return;
   }
 
-  await saveBroadcastDraft(db, message.from!.id, text);
+  const hasMore = rows.results.length > perPage;
+  const list = hasMore ? rows.results.slice(0, perPage) : rows.results;
+
+  let text = `🏷️ <b>حراج‌های باز</b> (صفحه ${page + 1})\n\n`;
+  for (const r of list) {
+    const bid = r.current_bid ?? r.start_amount;
+    const remaining = r.ends_at ? formatDuration(Math.max(0, r.ends_at - now)) : "نامشخص";
+    text += `#${r.id} — <b>${escapeHtml(r.name ?? "؟")}</b>\n   💰 ${bid.toLocaleString("en-US")} MP | ⏳ ${remaining} | گروه: ${r.telegram_group_id}\n\n`;
+  }
+
+  const keyboardRows = list.map((r) => [{
+    text: `❌ لغو: ${escapeHtml(r.name ?? "؟").slice(0, 18)} (#${r.id})`,
+    callback_data: `auctionmgr:cancel:${r.id}:${page}:user:${userId}`,
+  }]);
+  keyboardRows.push([
+    { text: "⬅️ قبلی", callback_data: `auctionmgr:page:${Math.max(0, page - 1)}:user:${userId}` },
+    { text: "➡️ بعدی", callback_data: `auctionmgr:page:${hasMore ? page + 1 : page}:user:${userId}` },
+  ]);
+  keyboardRows.push([{ text: "🔙 پنل ادمین", callback_data: `menu:admin:user:${userId}` }]);
+
+  await editMessageText(token, chatId, messageId, text, { inline_keyboard: keyboardRows });
+}
+
+async function renderConfigPage(token: string, db: D1Database, chatId: number, messageId: number, userId: number, page = 0) {
+  const perPage = 8;
+  const totalPages = Math.ceil(OWNER_CONFIG_SETTINGS.length / perPage);
+  const safePage = Math.max(0, Math.min(totalPages - 1, page));
+
+  const values = new Map<string, string>();
+  const keys = OWNER_CONFIG_SETTINGS.map((s) => s.key);
+  const stored = await db.prepare(`SELECT key, value FROM bot_settings WHERE key IN (${keys.map(() => "?").join(",")})`).bind(...keys).all<{ key: string; value: string }>();
+  for (const row of stored.results ?? []) values.set(row.key, row.value);
+
+  const entries = OWNER_CONFIG_SETTINGS.slice(safePage * perPage, safePage * perPage + perPage).map((s) => ({
+    key: s.key,
+    label: s.label,
+    type: s.type,
+    value: values.get(s.key) ?? s.defaultValue,
+  }));
+
+  const text =
+    `⚙️ <b>تنظیمات Meow</b> (صفحه ${safePage + 1}/${totalPages})\n\n` +
+    `برای مقدار دقیق:\n<code>/config کلید مقدار</code>\n\n` +
+    entries.map((e) => `<code>${e.key}</code>: <b>${e.value}</b>`).join("\n");
+
+  await editMessageText(token, chatId, messageId, text, configPageKeyboard(entries, safePage, totalPages, userId));
+}
+
+/** Apply a config delta from the editor, with min≤max pair validation. */
+export function computeConfigValue(setting: { key: string; type: "int" | "float" }, current: string, delta: number): { value: number } | { error: string } {
+  let newVal: number;
+  if (setting.type === "int") {
+    newVal = Math.max(0, parseInt(current, 10) + Math.round(delta));
+  } else {
+    newVal = Math.round((parseFloat(current) + delta) * 10000) / 10000;
+    if (setting.key.endsWith("_chance")) newVal = Math.max(0, Math.min(1, newVal));
+  }
+  return { value: newVal };
+}
+
+/** Returns an error string when the new min/max breaks its pair, else null. */
+export function validateConfigPair(key: string, newVal: number, siblingKey: string, siblingVal: number): string | null {
+  if (key.endsWith("_min") && newVal > siblingVal) return `min (${newVal}) > max (${siblingVal})`;
+  if (key.endsWith("_max") && newVal < siblingVal) return `max (${newVal}) < min (${siblingVal})`;
+  void siblingKey;
+  return null;
+}
+
+async function applyConfigDelta(token: string, db: D1Database, callback: TelegramCallbackQuery, key: string, delta: number) {
+  const setting = OWNER_CONFIG_SETTINGS.find((s) => s.key === key);
+  if (!setting) {
+    await answerCallback(token, callback.id, "❌ کلید نامعتبر", true);
+    return;
+  }
+  const stored = await getBotSetting(db, key);
+  const current = stored !== null && stored !== "" ? stored : setting.defaultValue;
+
+  const computed = computeConfigValue(setting, current, delta);
+  if ("error" in computed) {
+    await answerCallback(token, callback.id, `⚠️ ${computed.error}`, true);
+    return;
+  }
+  const newVal = computed.value;
+
+  const sibling = key.endsWith("_min")
+    ? OWNER_CONFIG_SETTINGS.find((s) => s.key === key.replace("_min", "_max"))
+    : key.endsWith("_max")
+      ? OWNER_CONFIG_SETTINGS.find((s) => s.key === key.replace("_max", "_min"))
+      : undefined;
+  if (sibling) {
+    const siblingStored = await getBotSetting(db, sibling.key);
+    const siblingVal = parseFloat(siblingStored !== null && siblingStored !== "" ? siblingStored : sibling.defaultValue);
+    const error = validateConfigPair(key, newVal, sibling.key, siblingVal);
+    if (error) {
+      await answerCallback(token, callback.id, `⚠️ ${error}!`, true);
+      return;
+    }
+  }
+
+  await setBotSetting(db, key, String(newVal));
+  await answerCallback(token, callback.id, `✅ ${setting.label} = ${newVal}`);
+}
+
+// ---------------------------------------------------------------------------
+// Broadcast (chunked + resumable: one chunk per callback press, so every
+// invocation stays under the Free plan's 50 subrequests / 50 D1 queries)
+// ---------------------------------------------------------------------------
+
+type BroadcastMode = "users" | "groups";
+
+async function broadcastTargets(db: D1Database, mode: BroadcastMode, lastId: number, limit: number) {
+  if (mode === "groups") {
+    return db.prepare(`SELECT telegram_group_id FROM telegram_groups WHERE telegram_group_id > ? AND is_active = 1 ORDER BY telegram_group_id LIMIT ?`)
+      .bind(lastId, limit)
+      .all<{ telegram_group_id: number }>();
+  }
+  return db.prepare(`SELECT telegram_id FROM users WHERE telegram_id > ? AND is_banned = 0 ORDER BY telegram_id LIMIT ?`)
+    .bind(lastId, limit)
+    .all<{ telegram_id: number }>();
+}
+
+async function broadcastCount(db: D1Database, mode: BroadcastMode): Promise<number> {
+  const table = mode === "groups" ? "telegram_groups" : "users";
+  const clause = mode === "groups" ? "is_active = 1" : "is_banned = 0";
+  const row = await db.prepare(`SELECT COUNT(*) as c FROM ${table} WHERE ${clause}`).first<{ c: number }>();
+  return row?.c ?? 0;
+}
+
+interface BroadcastCursor {
+  lastId: number;
+  sent: number;
+  failed: number;
+  total: number;
+}
+
+async function getBroadcastCursor(db: D1Database, ownerId: number): Promise<BroadcastCursor> {
+  const raw = await getBotSetting(db, broadcastCursorKey(ownerId));
+  if (!raw) return { lastId: 0, sent: 0, failed: 0, total: 0 };
+  try {
+    return JSON.parse(raw) as BroadcastCursor;
+  } catch {
+    return { lastId: 0, sent: 0, failed: 0, total: 0 };
+  }
+}
+
+async function saveBroadcastCursor(db: D1Database, ownerId: number, cursor: BroadcastCursor) {
+  await setBotSetting(db, broadcastCursorKey(ownerId), JSON.stringify(cursor));
+}
+
+async function clearBroadcastState(db: D1Database, ownerId: number) {
+  await deleteBroadcastDraft(db, ownerId);
+  await db.batch([
+    db.prepare(`DELETE FROM bot_settings WHERE key = ?`).bind(broadcastCursorKey(ownerId)),
+    db.prepare(`DELETE FROM bot_settings WHERE key = ?`).bind(broadcastModeKey(ownerId)),
+    db.prepare(`DELETE FROM bot_settings WHERE key = ?`).bind(broadcastPendingKey(ownerId)),
+  ]);
+}
+
+/**
+ * Send one chunk (≤40 targets) of the pending broadcast. Returns true when the
+ * broadcast is finished (or has nothing left to send).
+ */
+async function runBroadcastChunk(token: string, db: D1Database, ownerId: number, mode: BroadcastMode): Promise<{ done: boolean; sent: number; failed: number; total: number }> {
+  const draft = await getBroadcastDraft(db, ownerId);
+  const cursor = await getBroadcastCursor(db, ownerId);
+  if (!draft || cursor.total > 0 && cursor.sent + cursor.failed >= cursor.total) {
+    await clearBroadcastState(db, ownerId);
+    return { done: true, sent: cursor.sent, failed: cursor.failed, total: cursor.total };
+  }
+
+  const rows = await broadcastTargets(db, mode, cursor.lastId, BROADCAST_CHUNK_SIZE);
+  if (!rows.results.length) {
+    await clearBroadcastState(db, ownerId);
+    return { done: true, sent: cursor.sent, failed: cursor.failed, total: cursor.sent + cursor.failed };
+  }
+
+  for (const r of rows.results) {
+    const id = mode === "groups" ? (r as { telegram_group_id: number }).telegram_group_id : (r as { telegram_id: number }).telegram_id;
+    const res = await telegramRequest(token, "sendMessage", {
+      chat_id: id,
+      text: `📢 <b>پیام از طرف ادمین</b>\n\n${escapeHtml(draft)}`,
+      parse_mode: "HTML",
+    });
+    if (res.ok) cursor.sent++;
+    else cursor.failed++;
+    cursor.lastId = id;
+  }
+  await saveBroadcastCursor(db, ownerId, cursor);
+  await new Promise((r) => setTimeout(r, BROADCAST_CHUNK_SLEEP_MS));
+  const total = cursor.total > 0 ? cursor.total : cursor.sent + cursor.failed;
+  return { done: cursor.sent + cursor.failed >= total, sent: cursor.sent, failed: cursor.failed, total };
+}
+
+export async function handleOwnerBroadcast(token: string, db: D1Database, env: Bindings, message: TelegramMessage) {
+  if (!(await requireOwner(token, env, message))) return;
+  const text = (message.text || "").replace(/^\/broadcast\s*/, "");
+  let mode: BroadcastMode = "users";
+  let payload = text;
+  if (/^(groups|group|گروه)\s+/i.test(text)) {
+    mode = "groups";
+    payload = text.replace(/^(groups|group|گروه)\s+/i, "");
+  }
+  if (!payload.trim()) {
+    await sendMessage(token, message.chat.id, "🐱 نحوه استفاده: /broadcast پیام شما\nیا برای گروه‌ها: /broadcast groups پیام شما");
+    return;
+  }
+
+  await saveBroadcastDraft(db, message.from!.id, payload);
+  await setBotSetting(db, broadcastModeKey(message.from!.id), mode);
+  const target = mode === "groups" ? "گروه‌ها" : "کاربران";
   await sendMessage(token, message.chat.id,
-    `📢 <b>پیش‌نمایش پیام همگانی:</b>\n\n${escapeHtml(text)}\n\nآماده ارسال به همه کاربران؟`,
+    `📢 <b>پیش‌نمایش پیام همگانی (به ${target}):</b>\n\n${escapeHtml(payload)}\n\nآماده ارسال؟`,
     { reply_markup: broadcastConfirmKeyboard(message.from?.id) }
   );
 }
 
-export async function handleBroadcastConfirm(token: string, db: D1Database, env: Bindings, callback: TelegramCallbackQuery) {
-  if (!callback.from || !isOwner(env, callback.from.id)) {
+/** Continue/start the broadcast pipeline from a callback press. */
+export async function handleBroadcastContinue(token: string, db: D1Database, env: Bindings, callback: TelegramCallbackQuery, finish = false) {
+  if (!callback.from || !callback.message) return;
+  if (!isOwner(env, callback.from.id)) {
     await answerCallback(token, callback.id, "🚫 فقط ادمین!", true);
     return;
   }
 
-  const draft = await getBroadcastDraft(db, callback.from.id);
+  const ownerId = callback.from.id;
+  const chatId = callback.message.chat.id;
+  const messageId = callback.message.message_id;
+  const mode = ((await getBotSetting(db, broadcastModeKey(ownerId))) ?? "users") as BroadcastMode;
+  const draft = await getBroadcastDraft(db, ownerId);
   if (!draft) {
-    await answerCallback(token, callback.id, "❌ پیش‌نمایش منقضی شده!", true);
+    await answerCallback(token, callback.id, "❌ پیام همگانی منقضی شده!", true);
     return;
   }
 
-  await deleteBroadcastDraft(db, callback.from.id);
-  await answerCallback(token, callback.id, "📢 در حال ارسال...");
-
-  let sent = 0;
-  let failed = 0;
-  let lastId = 0;
-
-  while (true) {
-    const users = await db.prepare(`SELECT telegram_id FROM users WHERE telegram_id > ? AND is_banned = 0 ORDER BY telegram_id LIMIT ?`)
-      .bind(lastId, BROADCAST_PAGE_SIZE)
-      .all<{ telegram_id: number }>();
-
-    if (!users.results.length) break;
-
-    for (const u of users.results) {
-      const res = await telegramRequest(token, "sendMessage", {
-        chat_id: u.telegram_id,
-        text: `📢 <b>پیام از طرف ادمین</b>\n\n${escapeHtml(draft)}`,
-        parse_mode: "HTML",
-      });
-      if (res.ok) sent++;
-      else failed++;
-      lastId = u.telegram_id;
-    }
-
-    await new Promise((r) => setTimeout(r, Math.ceil(users.results.length / 25) * 1000));
+  if (finish) {
+    await clearBroadcastState(db, ownerId);
+    await editMessageText(token, chatId, messageId, "❌ ارسال متوقف شد.", ownerPanelKeyboard(ownerId));
+    await answerCallback(token, callback.id, "توقف شد.");
+    return;
   }
 
-  if (callback.message) {
-    await editMessageText(token, callback.message.chat.id, callback.message.message_id,
-      `📢 <b>ارسال تکمیل شد!</b>\n\n✅ موفق: ${sent}\n❌ ناموفق: ${failed}`,
-      ownerPanelKeyboard(callback.from?.id)
+  const cursor = await getBroadcastCursor(db, ownerId);
+  const total = cursor.total > 0 ? cursor.total : await broadcastCount(db, mode);
+  if (cursor.total === 0) {
+    cursor.total = total;
+    await saveBroadcastCursor(db, ownerId, cursor);
+  }
+
+  const result = await runBroadcastChunk(token, db, ownerId, mode);
+
+  if (result.done) {
+    await editMessageText(token, chatId, messageId,
+      `📢 <b>ارسال کامل شد!</b>\n\n✅ موفق: ${result.sent}\n❌ ناموفق: ${result.failed}\n👥 کل: ${result.total}`,
+      broadcastProgressKeyboard(ownerId, true)
+    );
+  } else {
+    await editMessageText(token, chatId, messageId,
+      `📢 <b>در حال ارسال…</b>\n\n✅ موفق: ${result.sent}\n❌ ناموفق: ${result.failed}\n👥 ارسال شد: ${result.sent + result.failed} از ${result.total}\n\nبرای ادامه، دکمه ▶️ را بزن.`,
+      broadcastProgressKeyboard(ownerId)
     );
   }
+  await answerCallback(token, callback.id, result.done ? "✅ کامل شد!" : "📨 ادامه بده…");
 }
+
+// ---------------------------------------------------------------------------
+// User management
+// ---------------------------------------------------------------------------
 
 export async function handleOwnerAddPoints(token: string, db: D1Database, env: Bindings, message: TelegramMessage) {
   if (!(await requireOwner(token, env, message))) return;
-  const parts = (message.text || "").split(" ");
+  const parts = (message.text || "").split(" ").filter(Boolean);
   if (parts.length < 3) {
-    await sendMessage(token, message.chat.id, "🐱 /addpoints @username 100");
+    await sendMessage(token, message.chat.id, "🐱 /addpoints @username 100\nیا\n/addpoints 123456789 100");
     return;
   }
 
@@ -171,7 +576,7 @@ export async function handleOwnerAddPoints(token: string, db: D1Database, env: B
     return;
   }
 
-  const user = await findUserByUsername(db, normalizeUsername(parts[1]));
+  const { user } = await resolveUserByIdOrUsername(db, parts[1]);
   if (!user) {
     await sendMessage(token, message.chat.id, "کاربر پیدا نشد!");
     return;
@@ -186,9 +591,9 @@ export async function handleOwnerAddPoints(token: string, db: D1Database, env: B
 
 export async function handleOwnerRemovePoints(token: string, db: D1Database, env: Bindings, message: TelegramMessage) {
   if (!(await requireOwner(token, env, message))) return;
-  const parts = (message.text || "").split(" ");
+  const parts = (message.text || "").split(" ").filter(Boolean);
   if (parts.length < 3) {
-    await sendMessage(token, message.chat.id, "🐱 /removepoints @username 100");
+    await sendMessage(token, message.chat.id, "🐱 /removepoints @username 100\nیا\n/removepoints 123456789 100");
     return;
   }
 
@@ -198,7 +603,7 @@ export async function handleOwnerRemovePoints(token: string, db: D1Database, env
     return;
   }
 
-  const user = await findUserByUsername(db, normalizeUsername(parts[1]));
+  const { user } = await resolveUserByIdOrUsername(db, parts[1]);
   if (!user) {
     await sendMessage(token, message.chat.id, "کاربر پیدا نشد!");
     return;
@@ -213,13 +618,13 @@ export async function handleOwnerRemovePoints(token: string, db: D1Database, env
 
 export async function handleOwnerResetUser(token: string, db: D1Database, env: Bindings, message: TelegramMessage) {
   if (!(await requireOwner(token, env, message))) return;
-  const parts = (message.text || "").split(" ");
+  const parts = (message.text || "").split(" ").filter(Boolean);
   if (parts.length < 2) {
-    await sendMessage(token, message.chat.id, "🐱 /resetuser @username");
+    await sendMessage(token, message.chat.id, "🐱 /resetuser @username\nیا\n/resetuser 123456789");
     return;
   }
 
-  const user = await findUserByUsername(db, normalizeUsername(parts[1]));
+  const { user } = await resolveUserByIdOrUsername(db, parts[1]);
   if (!user) {
     await sendMessage(token, message.chat.id, "کاربر پیدا نشد!");
     return;
@@ -236,33 +641,29 @@ export async function handleOwnerUserInfo(token: string, db: D1Database, env: Bi
   if (!(await requireOwner(token, env, message))) return;
   const parts = (message.text || "").split(" ").filter(Boolean);
   if (parts.length < 2) {
-    await sendMessage(token, message.chat.id, "🐱 /userinfo @username\nیا\n/userinfo 123456789");
+    await sendMessage(token, message.chat.id, "🐱 /userinfo @username\nیا\n/userinfo 123456789\nیا\n/userinfo نام");
     return;
   }
 
-  const raw = parts[1];
-  let userId: number | null = null;
-  let user: any = null;
+  const { user } = await resolveUserByIdOrUsername(db, parts[1]);
 
-  if (/^\d+$/.test(raw)) {
-    userId = parseInt(raw, 10);
-    user = await findUserById(db, userId);
-  } else {
-    const found = await findUserByUsername(db, normalizeUsername(raw));
-    if (found) {
-      userId = found.telegram_id;
-      user = await findUserById(db, userId);
-    }
-  }
-
+  // Not an exact match → fuzzy search, show top matches as buttons.
   if (!user) {
-    await sendMessage(token, message.chat.id, "کاربر پیدا نشد!");
+    const results = await searchUsers(db, parts[1]);
+    if (!results.results.length) {
+      await sendMessage(token, message.chat.id, "کاربر پیدا نشد!");
+      return;
+    }
+    let text = `🔍 <b>نتایج جستجو</b> (${results.results.length}):\n\n`;
+    text += results.results.map((r) => `• ${escapeHtml(r.first_name)}${r.username ? ` @${r.username}` : ""} — #${r.telegram_id}`).join("\n");
+    await sendMessage(token, message.chat.id, text, { reply_markup: userSearchResultsKeyboard(results.results, message.from?.id) });
     return;
   }
 
-  const txns = await getUserTransactions(db, user.telegram_id, 5);
-  const groups = await getUserGroupMemberships(db, user.telegram_id);
-  const banned = await isUserBanned(db, user.telegram_id);
+  const userId = user.telegram_id;
+  const txns = await getUserTransactions(db, userId, 5);
+  const groups = await getUserGroupMemberships(db, userId);
+  const banned = await isUserBanned(db, userId);
 
   const createdDate = formatTehranDate(user.created_at || 0);
 
@@ -272,7 +673,6 @@ export async function handleOwnerUserInfo(token: string, db: D1Database, env: Bi
   text += `🔗 یوزرنیم: ${user.username ? "@" + escapeHtml(user.username) : "ندارد"}\n`;
   text += `💰 امتیاز: <b>${user.meow_points} MP</b>\n`;
   text += `🐾 کل میوها: <b>${user.total_meows}</b>\n`;
-  // duel_rating is now per-group; shown in the group context below
   text += `📅 عضویت: <b>${createdDate}</b>\n`;
   text += `🚫 وضعیت: <b>${banned ? "❌ بن شده" : "✅ فعال"}</b>\n\n`;
 
@@ -292,18 +692,44 @@ export async function handleOwnerUserInfo(token: string, db: D1Database, env: Bi
     }
   }
 
-  await sendMessage(token, message.chat.id, text, { reply_markup: userActionKeyboard(user.telegram_id, message.from?.id) });
+  await sendMessage(token, message.chat.id, text, { reply_markup: userActionKeyboard(userId, message.from?.id) });
+}
+
+/** Search flow entry used by the panel's 🔍 button + pending-text hook. */
+export async function handleOwnerSearch(token: string, db: D1Database, env: Bindings, message: TelegramMessage, text: string) {
+  if (!(await requireOwner(token, env, message))) return;
+  const parts = text.trim().split(" ").filter(Boolean);
+  if (!parts.length) {
+    await sendMessage(token, message.chat.id, "نام، یوزرنیم یا آیدی کاربر را بفرست.");
+    return;
+  }
+
+  const { user } = await resolveUserByIdOrUsername(db, parts[0]);
+  if (user) {
+    const infoMessage = { ...message, text: `/userinfo ${user.telegram_id}` } as TelegramMessage;
+    await handleOwnerUserInfo(token, db, env, infoMessage);
+    return;
+  }
+
+  const results = await searchUsers(db, text.trim());
+  if (!results.results.length) {
+    await sendMessage(token, message.chat.id, "کاربری پیدا نشد!");
+    return;
+  }
+  let out = `🔍 <b>نتایج جستجو</b> (${results.results.length}):\n\n`;
+  out += results.results.map((r) => `• ${escapeHtml(r.first_name)}${r.username ? ` @${r.username}` : ""} — #${r.telegram_id}`).join("\n");
+  await sendMessage(token, message.chat.id, out, { reply_markup: userSearchResultsKeyboard(results.results, message.from?.id) });
 }
 
 export async function handleOwnerBanUser(token: string, db: D1Database, env: Bindings, message: TelegramMessage) {
   if (!(await requireOwner(token, env, message))) return;
-  const parts = (message.text || "").split(" ");
+  const parts = (message.text || "").split(" ").filter(Boolean);
   if (parts.length < 2) {
-    await sendMessage(token, message.chat.id, "🐱 /banuser @username");
+    await sendMessage(token, message.chat.id, "🐱 /banuser @username\nیا\n/banuser 123456789");
     return;
   }
 
-  const user = await findUserByUsername(db, normalizeUsername(parts[1]));
+  const { user } = await resolveUserByIdOrUsername(db, parts[1]);
   if (!user) {
     await sendMessage(token, message.chat.id, "کاربر پیدا نشد!");
     return;
@@ -315,13 +741,13 @@ export async function handleOwnerBanUser(token: string, db: D1Database, env: Bin
 
 export async function handleOwnerUnbanUser(token: string, db: D1Database, env: Bindings, message: TelegramMessage) {
   if (!(await requireOwner(token, env, message))) return;
-  const parts = (message.text || "").split(" ");
+  const parts = (message.text || "").split(" ").filter(Boolean);
   if (parts.length < 2) {
-    await sendMessage(token, message.chat.id, "🐱 /unbanuser @username");
+    await sendMessage(token, message.chat.id, "🐱 /unbanuser @username\nیا\n/unbanuser 123456789");
     return;
   }
 
-  const user = await findUserByUsername(db, normalizeUsername(parts[1]));
+  const { user } = await resolveUserByIdOrUsername(db, parts[1]);
   if (!user) {
     await sendMessage(token, message.chat.id, "کاربر پیدا نشد!");
     return;
@@ -331,9 +757,12 @@ export async function handleOwnerUnbanUser(token: string, db: D1Database, env: B
   await sendMessage(token, message.chat.id, `✅ کاربر ${escapeHtml(user.first_name)} آنبن شد!`);
 }
 
-export async function handleOwnerRepair(token: string, db: D1Database, env: Bindings, message: TelegramMessage) {
-  if (!(await requireOwner(token, env, message))) return;
+// ---------------------------------------------------------------------------
+// Database repair & health
+// ---------------------------------------------------------------------------
 
+/** Run the consistency checks; returns the human-readable report lines. */
+export async function runRepairChecks(db: D1Database): Promise<string[]> {
   const issues: string[] = [];
 
   const negativeUsers = await db.prepare(`SELECT telegram_id, first_name, meow_points FROM users WHERE meow_points < 0`).all<{ telegram_id: number; first_name: string; meow_points: number }>();
@@ -413,11 +842,40 @@ export async function handleOwnerRepair(token: string, db: D1Database, env: Bind
     issues.push(`🏷️ ${clobberedCount} نام کاربری خراب (#id) در گروه‌ها ترمیم شد`);
   }
 
-  if (issues.length === 0) {
-    await sendMessage(token, message.chat.id, "✅ دیتابیس سالمه! هیچ مشکلی پیدا نشد.");
-  } else {
-    await sendMessage(token, message.chat.id, `🔍 <b>نتایج بررسی:</b>\n\n${issues.join("\n\n")}`);
-  }
+  return issues;
+}
+
+export async function handleOwnerRepair(token: string, db: D1Database, env: Bindings, message: TelegramMessage) {
+  if (!(await requireOwner(token, env, message))) return;
+
+  const issues = await runRepairChecks(db);
+  const text = issues.length === 0
+    ? "✅ دیتابیس سالمه! هیچ مشکلی پیدا نشد."
+    : `🔍 <b>نتایج بررسی:</b>\n\n${issues.join("\n\n")}`;
+
+  await sendMessage(token, message.chat.id, text, { reply_markup: repairKeyboard(message.from?.id) });
+}
+
+/** Sync balances with the transaction ledger (repair:fix). */
+async function fixBalanceMismatches(db: D1Database): Promise<number> {
+  const before = await db.prepare(`
+    SELECT COUNT(*) as c FROM (
+      SELECT u.telegram_id
+      FROM users u
+      LEFT JOIN transactions t ON u.telegram_id = t.telegram_user_id
+      GROUP BY u.telegram_id
+      HAVING u.meow_points != COALESCE(SUM(t.amount), 0)
+    )
+  `).first<{ c: number }>();
+
+  await db.prepare(`
+    UPDATE users SET meow_points = COALESCE((SELECT SUM(amount) FROM transactions t WHERE t.telegram_user_id = users.telegram_id), 0)
+  `).run();
+  await db.prepare(`
+    UPDATE group_members SET meow_points = COALESCE((SELECT SUM(amount) FROM transactions t WHERE t.telegram_user_id = group_members.telegram_user_id AND t.group_id = group_members.telegram_group_id), 0)
+  `).run();
+
+  return before?.c ?? 0;
 }
 
 /**
@@ -506,6 +964,10 @@ export async function handleOwnerRefreshBadge(token: string, db: D1Database, env
   await sendMessage(token, message.chat.id, "✅ مقادیر badge با موفقیت به‌روزرسانی شد. total_meows همه کاربران و اعضای گروه بازسازی شد.");
 }
 
+// ---------------------------------------------------------------------------
+// Config
+// ---------------------------------------------------------------------------
+
 export async function handleOwnerConfig(token: string, db: D1Database, env: Bindings, message: TelegramMessage) {
   if (!(await requireOwner(token, env, message))) return;
   const parts = (message.text || "").split(" ").filter(Boolean);
@@ -520,7 +982,7 @@ export async function handleOwnerConfig(token: string, db: D1Database, env: Bind
     await sendMessage(
       token,
       message.chat.id,
-      `⚙️ <b>تنظیمات Meow</b>\n\n${OWNER_CONFIG_SETTINGS.map((setting) => `${setting.label}: <code>${configValues[setting.key]}</code>\n<code>${setting.key}</code>`).join("\n\n")}\n\nبرای تغییر مقدار، از دستور زیر استفاده کن:\n<code>/config meow_normal_min 1</code>\n<code>/config meow_royal_chance 0.005</code>\n\nبرای دیدن مقدار فعلی یک کلید، از دستور زیر استفاده کن:\n<code>/config meow_normal_min</code>`,
+      `⚙️ <b>تنظیمات Meow</b>\n\n${OWNER_CONFIG_SETTINGS.map((setting) => `${setting.label}: <code>${configValues[setting.key]}</code>\n<code>${setting.key}</code>`).join("\n\n")}\n\nبرای تغییر مقدار، از دستور زیر استفاده کن:\n<code>/config meow_street_min 1</code>\n<code>/config meow_galaxy_chance 0.005</code>\n\nبرای دیدن مقدار فعلی یک کلید، از دستور زیر استفاده کن:\n<code>/config meow_street_min</code>`,
     );
     return;
   }
@@ -542,7 +1004,7 @@ export async function handleOwnerConfig(token: string, db: D1Database, env: Bind
 
   let newVal = value.trim();
   if (setting.type === "int") {
-    const parsed = parseInt(newVal, 10);
+    const parsed = parseInt(toEnglishNumbers(newVal), 10);
     newVal = String(Math.max(0, Number.isFinite(parsed) ? parsed : 0));
   } else {
     const parsed = parseFloat(toEnglishNumbers(newVal).replace(",", "."));
@@ -552,15 +1014,38 @@ export async function handleOwnerConfig(token: string, db: D1Database, env: Bind
     newVal = String(chance);
   }
 
+  // min ≤ max pair validation (mirrors the panel editor).
+  const sibling = key.endsWith("_min")
+    ? OWNER_CONFIG_SETTINGS.find((s) => s.key === key.replace("_min", "_max"))
+    : key.endsWith("_max")
+      ? OWNER_CONFIG_SETTINGS.find((s) => s.key === key.replace("_max", "_min"))
+      : undefined;
+  if (sibling) {
+    const siblingStored = await getBotSetting(db, sibling.key);
+    const siblingVal = parseFloat(siblingStored !== null && siblingStored !== "" ? siblingStored : sibling.defaultValue);
+    if (key.endsWith("_min") && parseFloat(newVal) > siblingVal) {
+      await sendMessage(token, message.chat.id, `⚠️ حداقل نمی‌تواند از حداکثر (${siblingVal}) بیشتر باشد!`);
+      return;
+    }
+    if (key.endsWith("_max") && parseFloat(newVal) < siblingVal) {
+      await sendMessage(token, message.chat.id, `⚠️ حداکثر نمی‌تواند از حداقل (${siblingVal}) کمتر باشد!`);
+      return;
+    }
+  }
+
   await setBotSetting(db, key, newVal);
   await sendMessage(token, message.chat.id, `✅ ${setting.label} = ${newVal} تنظیم شد.`);
 }
+
+// ---------------------------------------------------------------------------
+// Groups
+// ---------------------------------------------------------------------------
 
 export async function handleGroups(token: string, db: D1Database, env: Bindings, message: TelegramMessage, page = 0) {
   if (!(await requireOwner(token, env, message))) return;
   const perPage = 5;
   const offset = page * perPage;
-  const userSuffix = `:user:${message.from!.id}`;
+  const u = message.from!.id;
 
   const groups = await db.prepare(`
     SELECT telegram_group_id, title, is_active,
@@ -571,7 +1056,7 @@ export async function handleGroups(token: string, db: D1Database, env: Bindings,
   `).bind(perPage + 1, offset).all<{ telegram_group_id: number; title: string; is_active: number; member_count: number }>();
 
   if (!groups.results.length) {
-    await sendMessage(token, message.chat.id, "🐱 هیچ گروهی پیدا نشد!", { reply_markup: ownerPanelKeyboard(message.from?.id) });
+    await sendMessage(token, message.chat.id, "🐱 هیچ گروهی پیدا نشد!", { reply_markup: ownerPanelKeyboard(u) });
     return;
   }
 
@@ -588,20 +1073,69 @@ export async function handleGroups(token: string, db: D1Database, env: Bindings,
   const keyboard: any[] = [];
   for (const g of rows) {
     keyboard.push([
-      { text: `📊 ${escapeHtml(g.title || "Group").slice(0, 15)}`, callback_data: `groupmgr:stats:${g.telegram_group_id}:${page}${userSuffix}` },
-      { text: g.is_active ? "🚫" : "✅", callback_data: `groupmgr:toggle:${g.telegram_group_id}:${page}${userSuffix}` },
-      { text: "🗑️", callback_data: `groupmgr:reset:${g.telegram_group_id}:${page}${userSuffix}` },
-      { text: "🔄 رفرش", callback_data: `groupmgr:refresh:${g.telegram_group_id}:${page}${userSuffix}` },
+      { text: `📊 ${escapeHtml(g.title || "Group").slice(0, 15)}`, callback_data: `groupmgr:view:${g.telegram_group_id}:${page}:user:${u}` },
+      { text: g.is_active ? "🚫 غیرفعال" : "✅ فعال", callback_data: `groupmgr:toggle:${g.telegram_group_id}:${page}:user:${u}` },
+      { text: "🔄 رفرش", callback_data: `groupmgr:refresh:${g.telegram_group_id}:${page}:user:${u}` },
     ]);
   }
   keyboard.push([
-    { text: "⬅️ قبلی", callback_data: `groupmgr:page:${Math.max(0, page - 1)}${userSuffix}` },
-    { text: "➡️ بعدی", callback_data: `groupmgr:page:${hasMore ? page + 1 : page}${userSuffix}` },
+    { text: "⬅️ قبلی", callback_data: `groupmgr:page:${Math.max(0, page - 1)}:user:${u}` },
+    { text: "➡️ بعدی", callback_data: `groupmgr:page:${hasMore ? page + 1 : page}:user:${u}` },
   ]);
-  keyboard.push([{ text: "🔙 پنل ادمین", callback_data: `menu:admin${userSuffix}` }]);
+  keyboard.push([{ text: "🔙 پنل ادمین", callback_data: `menu:admin:user:${u}` }]);
 
   await sendMessage(token, message.chat.id, text, { reply_markup: { inline_keyboard: keyboard } });
 }
+
+/** Render the per-group detail page in the owner's chat. */
+async function renderGroupPage(token: string, db: D1Database, chatId: number, messageId: number, groupId: number, page: number, userId: number) {
+  const g = await db.prepare(`
+    SELECT title, is_active, cooldown_seconds, treasury_balance, lottery_pot, lottery_ticket_price,
+      (SELECT COUNT(*) FROM group_members WHERE telegram_group_id = ?) as member_count,
+      (SELECT COALESCE(SUM(meow_points), 0) FROM group_members WHERE telegram_group_id = ?) as total_mp
+  `).bind(groupId, groupId).first<{
+    title: string; is_active: number; cooldown_seconds: number;
+    treasury_balance: number; lottery_pot: number; lottery_ticket_price: number;
+    member_count: number; total_mp: number;
+  }>();
+
+  if (!g) {
+    await editMessageText(token, chatId, messageId, "❌ گروه پیدا نشد.", ownerPanelKeyboard(userId));
+    return;
+  }
+
+  const text =
+    `📋 <b>${escapeHtml(g.title || "Group")}</b>\n\n` +
+    `🆔 <code>${groupId}</code>\n` +
+    `🤖 وضعیت: ${g.is_active ? "✅ فعال" : "🚫 غیرفعال"}\n` +
+    `⏱️ کول‌داون: ${g.cooldown_seconds}s\n` +
+    `👥 اعضا: <b>${g.member_count}</b>\n` +
+    `💰 مجموع امتیاز گروه: <b>${g.total_mp.toLocaleString("en-US")} MP</b>\n` +
+    `🏦 خزانه: <b>${g.treasury_balance.toLocaleString("en-US")} MP</b>\n` +
+    `🎟️ پات لاتاری: <b>${g.lottery_pot.toLocaleString("en-US")} MP</b> (قیمت بلیت: ${g.lottery_ticket_price} MP)`;
+
+  await editMessageText(token, chatId, messageId, text, groupPageKeyboard(groupId, page, g.is_active === 1, userId));
+}
+
+/** Render the lottery adjust page for a group in the owner's chat. */
+async function renderGroupLotteryPage(token: string, db: D1Database, chatId: number, messageId: number, groupId: number, page: number, userId: number) {
+  const g = await db.prepare(`SELECT lottery_pot, lottery_ticket_price, lottery_enabled FROM telegram_groups WHERE telegram_group_id = ?`).bind(groupId).first<{
+    lottery_pot: number; lottery_ticket_price: number; lottery_enabled: number;
+  }>();
+
+  const text =
+    `🎟️ <b>لاتاری گروه</b> <code>${groupId}</code>\n\n` +
+    `وضعیت: ${g?.lottery_enabled ? "✅ روشن" : "❌ خاموش"}\n` +
+    `💰 پات: <b>${(g?.lottery_pot ?? 0).toLocaleString("en-US")} MP</b>\n` +
+    `🎫 قیمت بلیت: <b>${g?.lottery_ticket_price ?? 0} MP</b>\n\n` +
+    `برای تغییر مالیات یا روشن/خاموش کردن، داخل گروه از /lottery استفاده کن.`;
+
+  await editMessageText(token, chatId, messageId, text, groupLotteryKeyboard(groupId, page, userId));
+}
+
+// ---------------------------------------------------------------------------
+// Duels & audit
+// ---------------------------------------------------------------------------
 
 export async function handleDuels(token: string, db: D1Database, env: Bindings, message: TelegramMessage) {
   if (!(await requireOwner(token, env, message))) return;
@@ -639,19 +1173,50 @@ export async function handleDuels(token: string, db: D1Database, env: Bindings, 
   await sendMessage(token, message.chat.id, text, { reply_markup: { inline_keyboard: keyboard } });
 }
 
-export async function handleAudit(token: string, db: D1Database, env: Bindings, message: TelegramMessage, page = 0) {
+export async function handleAudit(token: string, db: D1Database, env: Bindings, message: TelegramMessage, page = 0, filter = "") {
   if (!(await requireOwner(token, env, message))) return;
+
+  // Parse an optional filter argument: /audit [reason|@username|user-id]
+  if (!filter) {
+    const parts = (message.text || "").split(" ").filter(Boolean);
+    const arg = parts[1];
+    if (arg) {
+      const cleaned = toEnglishNumbers(arg);
+      if (/^\d+$/.test(cleaned)) {
+        filter = `u:${parseInt(cleaned, 10)}`;
+      } else if (arg.startsWith("@")) {
+        filter = `un:${normalizeUsername(arg)}`;
+      } else {
+        filter = `r:${arg.toUpperCase()}`;
+      }
+    }
+  }
+
   const perPage = 10;
   const offset = page * perPage;
 
+  let where = "";
+  const binds: unknown[] = [];
+  if (filter.startsWith("u:")) {
+    where = `WHERE t.telegram_user_id = ?`;
+    binds.push(parseInt(filter.slice(2), 10));
+  } else if (filter.startsWith("un:")) {
+    where = `WHERE LOWER(u.username) = LOWER(?)`;
+    binds.push(filter.slice(3));
+  } else if (filter.startsWith("r:")) {
+    where = `WHERE t.reason = ?`;
+    binds.push(filter.slice(2));
+  }
+
   const txns = await db.prepare(`
-    SELECT t.amount, t.reason, t.created_at, u.first_name, u.telegram_id
+    SELECT t.amount, t.reason, t.created_at, t.group_id, u.first_name, u.telegram_id
     FROM transactions t
     JOIN users u ON u.telegram_id = t.telegram_user_id
+    ${where}
     ORDER BY t.created_at DESC
     LIMIT ? OFFSET ?
-  `).bind(perPage + 1, offset).all<{
-    amount: number; reason: string; created_at: number;
+  `).bind(...binds, perPage + 1, offset).all<{
+    amount: number; reason: string; created_at: number; group_id: number | null;
     first_name: string; telegram_id: number;
   }>();
 
@@ -663,15 +1228,25 @@ export async function handleAudit(token: string, db: D1Database, env: Bindings, 
   const hasMore = txns.results.length > perPage;
   const rows = hasMore ? txns.results.slice(0, perPage) : txns.results;
 
-  let text = `📝 <b>آخرین تراکنش‌ها</b> (صفحه ${page + 1})\n\n`;
+  let text = `📝 <b>آخرین تراکنش‌ها</b> (صفحه ${page + 1})`;
+  if (filter) {
+    const label = filter.startsWith("u:") ? `کاربر #${filter.slice(2)}` : filter.startsWith("un:") ? `@${filter.slice(3)}` : `ریدان ${filter.slice(2)}`;
+    text += ` — فیلتر: <b>${label}</b>`;
+  }
+  text += `\n\n`;
   for (const t of rows) {
     const sign = t.amount >= 0 ? "+" : "";
     const time = formatTehranTime(t.created_at);
-    text += `${sign}${t.amount} <code>${t.reason}</code> — ${escapeHtml(t.first_name)} (${time})\n`;
+    const groupTag = t.group_id ? ` [گروه ${t.group_id}]` : "";
+    text += `${sign}${t.amount} <code>${t.reason}</code> — ${escapeHtml(t.first_name)}${groupTag} (${time})\n`;
   }
 
-  await sendMessage(token, message.chat.id, text, { reply_markup: txnAuditKeyboard(hasMore ? page : page - 1, message.from?.id) });
+  await sendMessage(token, message.chat.id, text, { reply_markup: txnAuditKeyboard(hasMore ? page : page - 1, message.from?.id, filter) });
 }
+
+// ---------------------------------------------------------------------------
+// Owner panel callback router
+// ---------------------------------------------------------------------------
 
 export async function handleOwnerPanelAction(
   token: string,
@@ -692,77 +1267,221 @@ export async function handleOwnerPanelAction(
     return;
   }
 
+  const edit = (text: string, kb?: any) => editMessageText(token, chatId, messageId, text, kb ?? ownerPanelKeyboard(userId));
+  const panel = () => ownerPanelKeyboard(userId);
+  const chat = callback.message.chat;
+  const fake = (text: string): TelegramMessage => ({ message_id: messageId, from: callback.from, chat, text });
+
   if (action === "admin") {
-    if (params[0] === "stats") {
-      const users = await db.prepare(`SELECT COUNT(*) as c FROM users`).first<{ c: number }>();
-      const groups = await db.prepare(`SELECT COUNT(*) as c FROM telegram_groups WHERE is_active = 1`).first<{ c: number }>();
-      const totalGroups = await db.prepare(`SELECT COUNT(*) as c FROM telegram_groups`).first<{ c: number }>();
-      const meows = await db.prepare(`SELECT SUM(total_meows) as c FROM users`).first<{ c: number }>();
-      const text = `📊 <b>آمار ربات</b>\n\n👤 کاربران: ${users?.c ?? 0}\n👥 گروه‌های فعال: ${groups?.c ?? 0}\n👥 کل گروه‌ها: ${totalGroups?.c ?? 0}\n🐾 کل میوها: ${meows?.c ?? 0}`;
-      await editMessageText(token, chatId, messageId, text, ownerPanelKeyboard(userId));
-    } else if (params[0] === "maintenance") {
-      const current = await db.prepare(`SELECT value FROM bot_settings WHERE key = 'maintenance'`).first<{ value: string }>();
-      const newMode = current?.value === "1" ? "0" : "1";
-      await db.prepare(`INSERT INTO bot_settings (key, value) VALUES ('maintenance', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).bind(newMode).run();
-      const status = newMode === "1" ? "🔴 روشن" : "🟢 خاموش";
-      await editMessageText(token, chatId, messageId, `🔧 <b>حالت تعمیرات: ${status}</b>\n\nربات ${newMode === "1" ? "فقط برای ادمین‌ها کار می‌کنه" : "برای همه فعاله"}`, ownerPanelKeyboard(userId));
-    } else if (params[0] === "broadcast") {
-      await editMessageText(token, chatId, messageId, `📢 <b>پیام همگانی</b>\n\nبرای ارسال پیام به همه کاربران، از دستور زیر استفاده کن:\n\n<code>/broadcast پیام شما</code>`, ownerPanelKeyboard(userId));
-    } else if (params[0] === "addpoints" || params[0] === "removepoints") {
-      await editMessageText(token, chatId, messageId, `💰 <b>${params[0] === "addpoints" ? "افزودن" : "کسر"} امتیاز</b>\n\nاستفاده:\n<code>/${params[0]} @username 100</code>`, ownerPanelKeyboard(userId));
-    } else if (params[0] === "resetuser") {
-      await editMessageText(token, chatId, messageId, `🔄 <b>ریست کاربر</b>\n\nاستفاده:\n<code>/resetuser @username</code>`, ownerPanelKeyboard(userId));
-    } else if (params[0] === "userinfo") {
-      await editMessageText(token, chatId, messageId, `👤 <b>اطلاعات کاربر</b>\n\nاستفاده:\n<code>/userinfo @username</code>\nیا\n<code>/userinfo 123456789</code>`, ownerPanelKeyboard(userId));
-    } else if (params[0] === "banmenu") {
-      await editMessageText(token, chatId, messageId, `🚫 <b>بن/آنبن کاربر</b>\n\nاستفاده:\n<code>/banuser @username</code>\n<code>/unbanuser @username</code>`, ownerPanelKeyboard(userId));
-    } else if (params[0] === "repair") {
-      await editMessageText(token, chatId, messageId, `🔍 <b>بررسی دیتابیس</b>\n\nاستفاده:\n<code>/repair</code>`, ownerPanelKeyboard(userId));
-    } else if (params[0] === "config") {
-      const fakeMessage: TelegramMessage = { message_id: messageId, from: callback.from, chat: callback.message.chat, text: "/config" };
-      await handleOwnerConfig(token, db, env, fakeMessage);
-    } else if (params[0] === "groups") {
-      const fakeMessage: TelegramMessage = { message_id: messageId, from: callback.from, chat: callback.message.chat, text: "/groups" };
-      await handleGroups(token, db, env, fakeMessage, 0);
-    } else if (params[0] === "duels") {
-      const fakeMessage: TelegramMessage = { message_id: messageId, from: callback.from, chat: callback.message.chat, text: "/duels" };
-      await handleDuels(token, db, env, fakeMessage);
-    } else if (params[0] === "audit") {
-      const fakeMessage: TelegramMessage = { message_id: messageId, from: callback.from, chat: callback.message.chat, text: "/audit" };
-      await handleAudit(token, db, env, fakeMessage, 0);
+    const sub = params[0];
+    switch (sub) {
+      case "stats":
+        await renderStatsPage(token, db, chatId, messageId, userId);
+        break;
+      case "users":
+        await edit("👤 <b>مدیریت کاربران</b>\n\nاز منوی زیر انتخاب کن:", usersMenuKeyboard(userId));
+        break;
+      case "search":
+        await setBotSetting(db, ownerSearchKey(userId), "1");
+        await edit("🔍 <b>جستجوی کاربر</b>\n\nنام، یوزرنیم یا آیدی کاربر را بفرست:", panel());
+        break;
+      case "broadcast": {
+        const mode = params[1];
+        if (mode === "users" || mode === "groups") {
+          await setBotSetting(db, broadcastPendingKey(userId), mode);
+          await edit(
+            mode === "groups"
+              ? "👥 <b>پیام همگانی به گروه‌ها</b>\n\nپیامت را بفرست:"
+              : "👤 <b>پیام همگانی به کاربران</b>\n\nپیامت را بفرست:",
+            panel()
+          );
+        } else {
+          await edit(
+            "📢 <b>پیام همگانی</b>\n\nگروه هدف را انتخاب کن:\n\nیا مستقیم:\n<code>/broadcast پیام</code> (کاربران)\n<code>/broadcast groups پیام</code> (گروه‌ها)",
+            broadcastModeKeyboard(userId)
+          );
+        }
+        break;
+      }
+      case "groups":
+        await handleGroups(token, db, env, fake("/groups"), 0);
+        break;
+      case "duels":
+        await handleDuels(token, db, env, fake("/duels"));
+        break;
+      case "events":
+        await renderEventsPage(token, db, env, chatId, messageId, userId);
+        break;
+      case "auctions":
+        await renderAuctionsPage(token, db, chatId, messageId, userId, 0);
+        break;
+      case "economy":
+        await renderEconomyPage(token, db, chatId, messageId, userId);
+        break;
+      case "audit":
+        await handleAudit(token, db, env, fake("/audit"), 0);
+        break;
+      case "config":
+        await renderConfigPage(token, db, chatId, messageId, userId, 0);
+        break;
+      case "repair": {
+        const issues = await runRepairChecks(db);
+        const text = issues.length === 0
+          ? "✅ دیتابیس سالمه! هیچ مشکلی پیدا نشد."
+          : `🔍 <b>نتایج بررسی:</b>\n\n${issues.join("\n\n")}`;
+        await edit(text, repairKeyboard(userId));
+        break;
+      }
+      case "maintenance": {
+        const current = await db.prepare(`SELECT value FROM bot_settings WHERE key = 'maintenance'`).first<{ value: string }>();
+        const newMode = current?.value === "1" ? "0" : "1";
+        await db.prepare(`INSERT INTO bot_settings (key, value) VALUES ('maintenance', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).bind(newMode).run();
+        const status = newMode === "1" ? "🔴 روشن" : "🟢 خاموش";
+        await edit(`🔧 <b>حالت تعمیرات: ${status}</b>\n\nربات ${newMode === "1" ? "فقط برای ادمین‌ها کار می‌کنه" : "برای همه فعاله"}`, panel());
+        break;
+      }
+      case "addpoints":
+        await edit("💰 <b>افزودن امتیاز</b>\n\nاستفاده:\n<code>/addpoints @username 100</code>\n<code>/addpoints 123456789 100</code>", panel());
+        break;
+      case "removepoints":
+        await edit("💰 <b>کسر امتیاز</b>\n\nاستفاده:\n<code>/removepoints @username 100</code>\n<code>/removepoints 123456789 100</code>", panel());
+        break;
+      case "resetuser":
+        await edit("🔄 <b>ریست کاربر</b>\n\nاستفاده:\n<code>/resetuser @username</code>\n<code>/resetuser 123456789</code>", panel());
+        break;
+      case "banmenu":
+        await edit("🚫 <b>بن/آنبن کاربر</b>\n\nاستفاده:\n<code>/banuser @username</code>\n<code>/unbanuser @username</code>\n<code>/banuser 123456789</code>", panel());
+        break;
+      case "useraudit":
+        await edit("📜 <b>تراکنش‌های یک کاربر</b>\n\nاستفاده:\n<code>/audit @username</code>\n<code>/audit 123456789</code>\n<code>/audit MEOW</code>", panel());
+        break;
+      default:
+        await edit("🐱 <b>Owner Panel</b>\n\nاز دکمه‌ها استفاده کن:", panel());
     }
     await answerCallback(token, callback.id);
     return;
   }
 
   if (action === "useract") {
-    const subAction = params[0];
-    const targetUserId = parseInt(params[1], 10);
-    const amount = parseInt(params[2], 10) || 0;
+    const sub = params[0];
+    // Reset confirm flows use `useract:reset:yes:<id>`; other actions use
+    // `useract:<sub>:<id>[:<amount>]`.
+    const stepLike = sub === "reset" && /^(yes|no)$/.test(params[1] ?? "");
+    const targetUserId = stepLike ? parseInt(params[2], 10) : parseInt(params[1], 10);
     const now = Math.floor(Date.now() / 1000);
 
-    if (subAction === "add") {
-      await db.prepare(`UPDATE users SET meow_points = meow_points + ? WHERE telegram_id = ?`).bind(amount, targetUserId).run();
-      await db.prepare(`INSERT INTO transactions (telegram_user_id, amount, reason, created_at) VALUES (?, ?, ?, ?)`)
-        .bind(targetUserId, amount, "OWNER_INLINE_ADD", now).run();
-      await answerCallback(token, callback.id, `✅ +${amount} MP`, true);
-    } else if (subAction === "sub") {
-      await db.prepare(`UPDATE users SET meow_points = MAX(0, meow_points - ?) WHERE telegram_id = ?`).bind(amount, targetUserId).run();
-      await db.prepare(`INSERT INTO transactions (telegram_user_id, amount, reason, created_at) VALUES (?, ?, ?, ?)`)
-        .bind(targetUserId, -amount, "OWNER_INLINE_SUB", now).run();
-      await answerCallback(token, callback.id, `✅ -${amount} MP`, true);
-    } else if (subAction === "ban") {
+    if (sub === "open") {
+      const user = await findUserById(db, targetUserId);
+      if (!user) {
+        await answerCallback(token, callback.id, "❌ کاربر پیدا نشد!", true);
+        return;
+      }
+      const txns = await getUserTransactions(db, targetUserId, 5);
+      const banned = await isUserBanned(db, targetUserId);
+      let text = `👤 <b>${escapeHtml(user.first_name)}</b>\n\n`;
+      text += `🆔 <code>${user.telegram_id}</code>\n`;
+      text += `💰 <b>${user.meow_points} MP</b>\n`;
+      text += `🐾 ${user.total_meows}\n`;
+      text += `🚫 ${banned ? "❌ بن شده" : "✅ فعال"}\n\n`;
+      if (txns.results.length) {
+        text += `📝 آخرین تراکنش‌ها:\n`;
+        for (const t of txns.results.slice(0, 3)) {
+          const sign = t.amount >= 0 ? "+" : "";
+          text += `  ${sign}${t.amount} — ${t.reason}\n`;
+        }
+      }
+      await editMessageText(token, chatId, messageId, text, userActionKeyboard(targetUserId, userId));
+      await answerCallback(token, callback.id);
+      return;
+    }
+
+    if (sub === "add" || sub === "sub") {
+      const amount = parseInt(params[2], 10) || 0;
+      if (amount <= 0) {
+        await answerCallback(token, callback.id, "❌ مقدار نامعتبر", true);
+        return;
+      }
+      if (sub === "add") {
+        await db.prepare(`UPDATE users SET meow_points = meow_points + ? WHERE telegram_id = ?`).bind(amount, targetUserId).run();
+        await db.prepare(`INSERT INTO transactions (telegram_user_id, amount, reason, created_at) VALUES (?, ?, ?, ?)`)
+          .bind(targetUserId, amount, "OWNER_INLINE_ADD", now).run();
+        await answerCallback(token, callback.id, `✅ +${amount} MP`, true);
+      } else {
+        await db.prepare(`UPDATE users SET meow_points = MAX(0, meow_points - ?) WHERE telegram_id = ?`).bind(amount, targetUserId).run();
+        await db.prepare(`INSERT INTO transactions (telegram_user_id, amount, reason, created_at) VALUES (?, ?, ?, ?)`)
+          .bind(targetUserId, -amount, "OWNER_INLINE_SUB", now).run();
+        await answerCallback(token, callback.id, `✅ -${amount} MP`, true);
+      }
+      const user = await findUserById(db, targetUserId);
+      if (user) {
+        await editMessageText(token, chatId, messageId,
+          `👤 <b>${escapeHtml(user.first_name)}</b>\n\n🆔 <code>${user.telegram_id}</code>\n💰 ${user.meow_points} MP\n🐾 ${user.total_meows}`,
+          userActionKeyboard(targetUserId, userId));
+      }
+      return;
+    }
+
+    if (sub === "ban") {
       await db.prepare(`UPDATE users SET is_banned = 1 WHERE telegram_id = ?`).bind(targetUserId).run();
       await answerCallback(token, callback.id, "🚫 کاربر بن شد!", true);
-    } else if (subAction === "unban") {
+      const user = await findUserById(db, targetUserId);
+      if (user) {
+        await editMessageText(token, chatId, messageId,
+          `👤 <b>${escapeHtml(user.first_name)}</b>\n\n🆔 <code>${user.telegram_id}</code>\n💰 ${user.meow_points} MP\n🚫 ❌ بن شده`,
+          userActionKeyboard(targetUserId, userId));
+      }
+      return;
+    }
+
+    if (sub === "unban") {
       await db.prepare(`UPDATE users SET is_banned = 0 WHERE telegram_id = ?`).bind(targetUserId).run();
       await answerCallback(token, callback.id, "✅ کاربر آنبن شد!", true);
-    } else if (subAction === "reset") {
-      await db.prepare(`UPDATE users SET meow_points = 0, total_meows = 0 WHERE telegram_id = ?`).bind(targetUserId).run();
-      await db.prepare(`DELETE FROM group_members WHERE telegram_user_id = ?`).bind(targetUserId).run();
-      await db.prepare(`DELETE FROM transactions WHERE telegram_user_id = ?`).bind(targetUserId).run();
-      await answerCallback(token, callback.id, "🔄 کاربر ریست شد!", true);
-    } else if (subAction === "txns") {
+      const user = await findUserById(db, targetUserId);
+      if (user) {
+        await editMessageText(token, chatId, messageId,
+          `👤 <b>${escapeHtml(user.first_name)}</b>\n\n🆔 <code>${user.telegram_id}</code>\n💰 ${user.meow_points} MP\n🚫 ✅ فعال`,
+          userActionKeyboard(targetUserId, userId));
+      }
+      return;
+    }
+
+    if (sub === "reset") {
+      const step = stepLike ? params[1] : (params[2] ?? "");
+      if (step === "yes") {
+        await db.prepare(`UPDATE users SET meow_points = 0, total_meows = 0 WHERE telegram_id = ?`).bind(targetUserId).run();
+        await db.prepare(`DELETE FROM group_members WHERE telegram_user_id = ?`).bind(targetUserId).run();
+        await db.prepare(`DELETE FROM transactions WHERE telegram_user_id = ?`).bind(targetUserId).run();
+        await answerCallback(token, callback.id, "🔄 کاربر ریست شد!", true);
+        const user = await findUserById(db, targetUserId);
+        await editMessageText(token, chatId, messageId,
+          user
+            ? `👤 <b>${escapeHtml(user.first_name)}</b>\n\n🆔 <code>${user.telegram_id}</code>\n💰 0 MP\n🐾 0\n\n🔄 کاملاً ریست شد.`
+            : "🔄 کاربر ریست شد!",
+          user ? userActionKeyboard(targetUserId, userId) : panel());
+        return;
+      }
+      if (step === "no") {
+        const user = await findUserById(db, targetUserId);
+        await answerCallback(token, callback.id, "انصراف");
+        if (user) {
+          await editMessageText(token, chatId, messageId,
+            `👤 <b>${escapeHtml(user.first_name)}</b>\n\n🆔 <code>${user.telegram_id}</code>\n💰 ${user.meow_points} MP\n🐾 ${user.total_meows}`,
+            userActionKeyboard(targetUserId, userId));
+        }
+        return;
+      }
+      // First tap → ask for confirmation.
+      const user = await findUserById(db, targetUserId);
+      await answerCallback(token, callback.id, "⚠️ این عمل قابل بازگشت نیست!", true);
+      if (user) {
+        await editMessageText(token, chatId, messageId,
+          `👤 <b>${escapeHtml(user.first_name)}</b>\n\n🆔 <code>${user.telegram_id}</code>\n💰 ${user.meow_points} MP\n🐾 ${user.total_meows}`,
+          userActionKeyboard(targetUserId, userId, true));
+      }
+      return;
+    }
+
+    if (sub === "txns") {
       const txns = await getUserTransactions(db, targetUserId, 10);
       let text = `📜 <b>تراکنش‌های کاربر</b>\n\n`;
       for (const t of txns.results) {
@@ -774,63 +1493,139 @@ export async function handleOwnerPanelAction(
       return;
     }
 
-    const user = await findUserById(db, targetUserId);
-    if (user) {
-      const text =
-        `👤 <b>${escapeHtml(user.first_name)}</b>\n\n` +
-        `🆔 <code>${user.telegram_id}</code>\n` +
-        `💰 ${user.meow_points} MP\n` +
-        `🐾 ${user.total_meows}`;
-      await editMessageText(token, chatId, messageId, text, userActionKeyboard(targetUserId, userId));
-    }
+    await answerCallback(token, callback.id);
     return;
   }
 
   if (action === "bc") {
-    if (params[0] === "confirm") {
-      await handleBroadcastConfirm(token, db, env, callback);
-    } else if (params[0] === "cancel") {
-      await deleteBroadcastDraft(db, callback.from.id);
-      await editMessageText(token, chatId, messageId, "❌ ارسال لغو شد.", ownerPanelKeyboard(userId));
+    const sub = params[0];
+    if (sub === "confirm") {
+      const draft = await getBroadcastDraft(db, userId);
+      if (!draft) {
+        await answerCallback(token, callback.id, "❌ پیش‌نمایش منقضی شده!", true);
+        return;
+      }
+      const mode = ((await getBotSetting(db, broadcastModeKey(userId))) ?? "users") as BroadcastMode;
+      const total = await broadcastCount(db, mode);
+      await saveBroadcastCursor(db, userId, { lastId: 0, sent: 0, failed: 0, total });
+      await handleBroadcastContinue(token, db, env, callback);
+    } else if (sub === "continue") {
+      await handleBroadcastContinue(token, db, env, callback);
+    } else if (sub === "stop") {
+      await handleBroadcastContinue(token, db, env, callback, true);
+    } else if (sub === "cancel") {
+      await clearBroadcastState(db, userId);
+      await edit("❌ ارسال لغو شد.", panel());
       await answerCallback(token, callback.id, "لغو شد.");
     }
     return;
   }
 
   if (action === "groupmgr") {
-    const targetGroupId = parseInt(params[1], 10);
-    const currentPage = parseInt(params[2], 10) || 0;
-    const now = Math.floor(Date.now() / 1000);
+    // Reset/delete confirm flows use `groupmgr:<sub>:yes:<gid>:<page>`;
+    // everything else uses `groupmgr:<sub>:<gid>:<page>`.
+    const stepLike = /^(yes|no)$/.test(params[1] ?? "");
+    const targetGroupId = stepLike ? parseInt(params[2], 10) : parseInt(params[1], 10);
+    const currentPage = stepLike ? parseInt(params[3], 10) || 0 : parseInt(params[2], 10) || 0;
+    const step = stepLike ? params[1] : "";
 
     if (params[0] === "page") {
-      const fakeMessage: TelegramMessage = { message_id: messageId, from: callback.from, chat: callback.message.chat, text: "/groups" };
-      await handleGroups(token, db, env, fakeMessage, targetGroupId);
+      await handleGroups(token, db, env, fake("/groups"), targetGroupId);
+      await answerCallback(token, callback.id);
+      return;
+    }
+
+    if (params[0] === "view") {
+      await renderGroupPage(token, db, chatId, messageId, targetGroupId, currentPage, userId);
       await answerCallback(token, callback.id);
       return;
     }
 
     if (params[0] === "toggle") {
-      const g = await db.prepare(`SELECT is_active, title FROM telegram_groups WHERE telegram_group_id = ?`).bind(targetGroupId).first<{ is_active: number; title: string }>();
+      const g = await db.prepare(`SELECT is_active FROM telegram_groups WHERE telegram_group_id = ?`).bind(targetGroupId).first<{ is_active: number }>();
       const newState = g?.is_active ? 0 : 1;
-      await db.prepare(`UPDATE telegram_groups SET is_active = ?, updated_at = ? WHERE telegram_group_id = ?`).bind(newState, now, targetGroupId).run();
+      await db.prepare(`UPDATE telegram_groups SET is_active = ?, updated_at = ? WHERE telegram_group_id = ?`).bind(newState, Math.floor(Date.now() / 1000), targetGroupId).run();
       await answerCallback(token, callback.id, newState ? "✅ گروه فعال شد" : "🚫 گروه غیرفعال شد", true);
-    } else if (params[0] === "reset") {
-      await db.prepare(`DELETE FROM group_members WHERE telegram_group_id = ?`).bind(targetGroupId).run();
-      await answerCallback(token, callback.id, "🔄 لیدربورد ریست شد!", true);
-    } else if (params[0] === "refresh") {
-      const fakeMessage: TelegramMessage = { message_id: messageId, from: callback.from, chat: callback.message.chat, text: "/refreshlb" };
-      await handleOwnerRefreshLeaderboard(token, db, env, fakeMessage, targetGroupId);
-      await answerCallback(token, callback.id);
+      await renderGroupPage(token, db, chatId, messageId, targetGroupId, currentPage, userId);
       return;
-    } else if (params[0] === "stats") {
-      const stats = await db.prepare(`SELECT COUNT(*) as c, SUM(meow_points) as p FROM group_members WHERE telegram_group_id = ?`).bind(targetGroupId).first<{ c: number; p: number }>();
-      await sendMessage(token, chatId, `📊 آمار گروه ${targetGroupId}:\n👥 ${stats?.c ?? 0} عضو\n💰 ${stats?.p ?? 0} MP کل`);
+    }
+
+    if (params[0] === "cooldown") {
+      const options = [5, 10, 30, 60, 300];
+      const g = await db.prepare(`SELECT cooldown_seconds FROM telegram_groups WHERE telegram_group_id = ?`).bind(targetGroupId).first<{ cooldown_seconds: number }>();
+      const currentIndex = Math.max(0, options.indexOf(g?.cooldown_seconds ?? 30));
+      const next = options[(currentIndex + 1) % options.length];
+      await db.prepare(`UPDATE telegram_groups SET cooldown_seconds = ? WHERE telegram_group_id = ?`).bind(next, targetGroupId).run();
+      await answerCallback(token, callback.id, `⏱️ کول‌داون: ${next}s`, true);
+      await renderGroupPage(token, db, chatId, messageId, targetGroupId, currentPage, userId);
+      return;
+    }
+
+    if (params[0] === "lottery") {
+      await renderGroupLotteryPage(token, db, chatId, messageId, targetGroupId, currentPage, userId);
       await answerCallback(token, callback.id);
       return;
     }
 
-    const fakeMessage: TelegramMessage = { message_id: messageId, from: callback.from, chat: callback.message.chat, text: "/groups" };
-    await handleGroups(token, db, env, fakeMessage, currentPage);
+    if (params[0] === "lprice" || params[0] === "lpot") {
+      const delta = parseInt(params[3], 10) || 0;
+      const { handleLotterySetPrice, handleLotterySetPot } = await import("./handlers");
+      if (params[0] === "lprice") {
+        await handleLotterySetPrice(token, db, targetGroupId, delta);
+        await answerCallback(token, callback.id, `🎫 قیمت: +${delta}`, true);
+      } else {
+        await handleLotterySetPot(token, db, targetGroupId, delta);
+        await answerCallback(token, callback.id, `💰 پات: +${delta}`, true);
+      }
+      await renderGroupLotteryPage(token, db, chatId, messageId, targetGroupId, currentPage, userId);
+      return;
+    }
+
+    if (params[0] === "refresh") {
+      await handleOwnerRefreshLeaderboard(token, db, env, fake("/refreshlb"), targetGroupId);
+      await answerCallback(token, callback.id, "🔄 لیدربورد رفرش شد!");
+      await renderGroupPage(token, db, chatId, messageId, targetGroupId, currentPage, userId);
+      return;
+    }
+
+    if (params[0] === "reset") {
+      if (step === "yes") {
+        await db.prepare(`DELETE FROM group_members WHERE telegram_group_id = ?`).bind(targetGroupId).run();
+        await answerCallback(token, callback.id, "🔄 لیدربورد ریست شد!", true);
+        await renderGroupPage(token, db, chatId, messageId, targetGroupId, currentPage, userId);
+        return;
+      }
+      if (step === "no") {
+        await answerCallback(token, callback.id, "انصراف");
+        await renderGroupPage(token, db, chatId, messageId, targetGroupId, currentPage, userId);
+        return;
+      }
+      await answerCallback(token, callback.id, "⚠️ مطمئنی؟", true);
+      await editMessageText(token, chatId, messageId, `🗑️ <b>ریست لیدربورد گروه</b> <code>${targetGroupId}</code>`, groupResetConfirmKeyboard(targetGroupId, currentPage, userId));
+      return;
+    }
+
+    if (params[0] === "delete") {
+      if (step === "yes") {
+        await db.batch([
+          db.prepare(`DELETE FROM group_members WHERE telegram_group_id = ?`).bind(targetGroupId),
+          db.prepare(`DELETE FROM telegram_groups WHERE telegram_group_id = ?`).bind(targetGroupId),
+        ]);
+        await answerCallback(token, callback.id, "🗑️ گروه حذف شد!", true);
+        await handleGroups(token, db, env, fake("/groups"), currentPage);
+        return;
+      }
+      if (step === "no") {
+        await answerCallback(token, callback.id, "انصراف");
+        await renderGroupPage(token, db, chatId, messageId, targetGroupId, currentPage, userId);
+        return;
+      }
+      await answerCallback(token, callback.id, "⚠️ مطمئنی؟", true);
+      await editMessageText(token, chatId, messageId, `🗑️ <b>حذف گروه</b> <code>${targetGroupId}</code>`, groupDeleteConfirmKeyboard(targetGroupId, currentPage, userId));
+      return;
+    }
+
+    await answerCallback(token, callback.id);
     return;
   }
 
@@ -847,21 +1642,134 @@ export async function handleOwnerPanelAction(
         });
       }
       await answerCallback(token, callback.id, "✅ دعوا لغو شد.", true);
-      const fakeMessage: TelegramMessage = { message_id: messageId, from: callback.from, chat: callback.message.chat, text: "/duels" };
-      await handleDuels(token, db, env, fakeMessage);
+      await handleDuels(token, db, env, fake("/duels"));
     }
     return;
   }
 
   if (action === "audit") {
     const targetPage = parseInt(params[1], 10) || 0;
-    const fakeMessage: TelegramMessage = { message_id: messageId, from: callback.from, chat: callback.message.chat, text: "/audit" };
-    await handleAudit(token, db, env, fakeMessage, targetPage);
+    const filter = params.slice(2).join(":");
+    await handleAudit(token, db, env, fake("/audit"), targetPage, filter);
+    await answerCallback(token, callback.id);
+    return;
+  }
+
+  if (action === "repair") {
+    const sub = params[0];
+    if (sub === "fix") {
+      await answerCallback(token, callback.id, "🔧 در حال رفع…");
+      const fixed = await fixBalanceMismatches(db);
+      const issues = await runRepairChecks(db);
+      const text =
+        `🔧 <b>رفع اختلافات</b>\n\n` +
+        `✅ امتیازهای ${fixed} کاربر با تراکنش‌ها هم‌سو شد.\n\n` +
+        (issues.length === 0 ? "🔍 بررسی بعدی: دیتابیس سالمه!" : `🔍 <b>باقی‌مانده:</b>\n\n${issues.join("\n\n")}`);
+      await edit(text, repairKeyboard(userId));
+    } else if (sub === "refreshbadge") {
+      await answerCallback(token, callback.id, "🏷️ در حال بازسازی…");
+      await db.prepare(`
+        UPDATE users
+        SET total_meows = (
+          SELECT COUNT(*) FROM transactions t
+          WHERE t.telegram_user_id = users.telegram_id AND t.reason = 'MEOW'
+        )
+      `).run();
+      await db.prepare(`
+        UPDATE group_members
+        SET total_meows = (
+          SELECT COUNT(*) FROM transactions t
+          WHERE t.telegram_user_id = group_members.telegram_user_id
+            AND t.group_id = group_members.telegram_group_id
+            AND t.reason = 'MEOW'
+        )
+      `).run();
+      const issues = await runRepairChecks(db);
+      await edit(
+        `🏷️ <b>بازسازی بج</b>\n\n✅ total_meows همه کاربران بازسازی شد.\n\n` +
+        (issues.length === 0 ? "🔍 بررسی: دیتابیس سالمه!" : `🔍 <b>باقی‌مانده:</b>\n\n${issues.join("\n\n")}`),
+        repairKeyboard(userId)
+      );
+    }
+    return;
+  }
+
+  if (action === "auctionmgr") {
+    const sub = params[0];
+    if (sub === "page") {
+      await renderAuctionsPage(token, db, chatId, messageId, userId, parseInt(params[1], 10) || 0);
+      await answerCallback(token, callback.id);
+      return;
+    }
+    if (sub === "cancel") {
+      const auctionId = parseInt(params[1], 10);
+      const page = parseInt(params[2], 10) || 0;
+      const a = await db.prepare(`SELECT telegram_group_id FROM title_auctions WHERE id = ?`).bind(auctionId).first<{ telegram_group_id: number }>();
+      if (!a) {
+        await answerCallback(token, callback.id, "❌ حراج پیدا نشد.", true);
+        return;
+      }
+      const msg = await cancelAuctionById(token, db, auctionId, a.telegram_group_id);
+      await answerCallback(token, callback.id, msg, msg.startsWith("❌"));
+      await renderAuctionsPage(token, db, chatId, messageId, userId, page);
+      return;
+    }
+    return;
+  }
+
+  if (action === "cfg") {
+    const sub = params[0];
+    if (sub === "page") {
+      await renderConfigPage(token, db, chatId, messageId, userId, parseInt(params[1], 10) || 0);
+      await answerCallback(token, callback.id);
+      return;
+    }
+    if (sub === "adj") {
+      const key = params[1];
+      const delta = parseFloat(toEnglishNumbers(params[2] ?? "0"));
+      if (!key || !Number.isFinite(delta) || delta === 0) {
+        await answerCallback(token, callback.id, "❌ مقدار نامعتبر", true);
+        return;
+      }
+      await applyConfigDelta(token, db, callback, key, delta);
+      return;
+    }
     await answerCallback(token, callback.id);
     return;
   }
 
   await answerCallback(token, callback.id);
+}
+
+/**
+ * Owner-only private-chat text hooks: a pending search query, or a broadcast
+ * draft waiting for its text. Returns true when the text was consumed.
+ */
+export async function handleOwnerPendingText(token: string, db: D1Database, env: Bindings, message: TelegramMessage, text: string): Promise<boolean> {
+  if (!message.from || !isOwner(env, message.from.id) || message.chat.type !== "private") return false;
+  const ownerId = message.from.id;
+
+  const searchFlag = await getBotSetting(db, ownerSearchKey(ownerId));
+  if (searchFlag) {
+    await db.prepare(`DELETE FROM bot_settings WHERE key = ?`).bind(ownerSearchKey(ownerId)).run();
+    await handleOwnerSearch(token, db, env, message, text);
+    return true;
+  }
+
+  const pendingMode = await getBotSetting(db, broadcastPendingKey(ownerId));
+  if (pendingMode === "users" || pendingMode === "groups") {
+    await db.prepare(`DELETE FROM bot_settings WHERE key = ?`).bind(broadcastPendingKey(ownerId)).run();
+    await saveBroadcastDraft(db, ownerId, text);
+    await setBotSetting(db, broadcastModeKey(ownerId), pendingMode);
+    const target = pendingMode === "groups" ? "گروه‌ها" : "کاربران";
+    await sendMessage(token, message.chat.id,
+      `📢 <b>پیش‌نمایش پیام همگانی (به ${target}):</b>\n\n${escapeHtml(text)}\n\nآماده ارسال؟`,
+      { reply_markup: broadcastConfirmKeyboard(ownerId) }
+    );
+    return true;
+  }
+
+  return false;
 }
 
 export const OWNER_COMMANDS: Record<string, (token: string, db: D1Database, env: Bindings, message: TelegramMessage) => Promise<void>> = {
@@ -881,5 +1789,3 @@ export const OWNER_COMMANDS: Record<string, (token: string, db: D1Database, env:
   "/duels": handleDuels,
   "/audit": handleAudit,
 };
-
-

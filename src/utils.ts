@@ -55,14 +55,16 @@ export function parseReplyAction(text: string): { kind: "userinfo" | "add" | "re
     return { kind: "userinfo", amount: null };
   }
 
-  const addMatch = normalized.match(/^افزودن\s+([0-9]+)$/i) || normalized.match(/^\+([0-9]+)$/);
+  // Accept Persian/Arabic digits too (۰-۹ / ٠-٩); normalize before parseInt.
+  const digit = "[0-9۰-۹٠-٩]";
+  const addMatch = normalized.match(new RegExp(`^افزودن\\s+(${digit}+)$`, "i")) || normalized.match(new RegExp(`^\\+(${digit}+)$`));
   if (addMatch) {
-    return { kind: "add", amount: parseInt(addMatch[1], 10) };
+    return { kind: "add", amount: parseInt(toEnglishNumbers(addMatch[1]), 10) };
   }
 
-  const removeMatch = normalized.match(/^کسر\s+([0-9]+)$/i) || normalized.match(/^\-([0-9]+)$/);
+  const removeMatch = normalized.match(new RegExp(`^کسر\\s+(${digit}+)$`, "i")) || normalized.match(new RegExp(`^\\-(${digit}+)$`));
   if (removeMatch) {
-    return { kind: "remove", amount: parseInt(removeMatch[1], 10) };
+    return { kind: "remove", amount: parseInt(toEnglishNumbers(removeMatch[1]), 10) };
   }
 
   return null;
