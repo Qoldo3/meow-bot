@@ -5,7 +5,9 @@ export function isValidDuelId(id: string): boolean {
 }
 
 export function safeParseAmount(str: string): number | null {
-  const num = parseInt(toEnglishNumbers(str), 10);
+  const cleaned = toEnglishNumbers(str).trim();
+  if (!/^\d+$/.test(cleaned)) return null;
+  const num = parseInt(cleaned, 10);
   if (!Number.isFinite(num) || num <= 0 || num > MAX_AMOUNT) return null;
   return num;
 }
@@ -16,7 +18,9 @@ export function normalizeUsername(raw: string): string {
 
 export function isMeow(text: string): boolean {
   const normalized = text.toLowerCase().split(" ").filter(Boolean).join(" ").trim();
-  if (normalized.startsWith("دعوا")) return false;
+  // Exclude the duel command (and words that merely start with it like
+  // "دعواگر") — the same token-boundary pattern app.ts uses to route duels.
+  if (/^دعوا(?=[\s\u200C]|$)/.test(normalized)) return false;
   if (/^(meo+w+ *)+$/.test(normalized)) return true;
   if (/^(می+و+ *)+$/.test(normalized)) return true;
   return false;
@@ -108,4 +112,31 @@ export function toEnglishNumbers(str: string): string {
   return str
     .replace(persian, (w) => String.fromCharCode(w.charCodeAt(0) - 1728))
     .replace(arabic, (w) => String.fromCharCode(w.charCodeAt(0) - 1584));
+}
+
+// Tehran is UTC+3:30 year-round (Iran abolished DST in 2022). Workers run on
+// UTC, so we shift the instant and format in UTC — deterministic everywhere.
+const TEHRAN_OFFSET_MS = 3.5 * 3600 * 1000;
+
+/** Format a unix timestamp as a Tehran date (Persian calendar). */
+export function formatTehranDate(ts: number): string {
+  return new Date(ts * 1000 + TEHRAN_OFFSET_MS).toLocaleDateString("fa-IR");
+}
+
+/** Format a unix timestamp as a Tehran time (Persian digits, HH:MM). */
+export function formatTehranTime(ts: number): string {
+  return new Date(ts * 1000 + TEHRAN_OFFSET_MS).toLocaleTimeString("fa-IR", {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+/** Current hour of day in Tehran (drives the day-part greeting). */
+export function tehranHour(now: number = Date.now()): number {
+  return new Date(now + TEHRAN_OFFSET_MS).getUTCHours();
+}
+
+/** Unix seconds of the most recent Tehran midnight (the bot's "day" boundary). */
+export function tehranDayStart(now: number = Date.now()): number {
+  return Math.floor((now + TEHRAN_OFFSET_MS) / 86400000) * 86400000 - TEHRAN_OFFSET_MS;
 }

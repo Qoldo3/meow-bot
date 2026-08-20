@@ -1,16 +1,23 @@
-import { DUEL_TIMEOUT_SEC, HOKM_LOBBY_TIMEOUT_SEC } from "./constants";
-import { telegramRequest, editMessageText } from "./telegram";
-import { cancelHokmGame } from "./hokmLobby";
+import { DUEL_TIMEOUT_SEC } from "./constants";
+import { telegramRequest } from "./telegram";
 import { escapeHtml } from "./utils";
+import {
+  sweepPendingSellerAuctions,
+  sweepDueTitleAuctions,
+  sweepRepostAuctions,
+  recoverStuckSettlingAuctions,
+} from "./titleAuction";
 
 /**
  * Scheduled cleanup (runs every minute via the cron trigger in wrangler.jsonc).
  *
  * The in-request setTimeout() paths in duel.ts / handlers.ts are best-effort:
  * a Worker isolate may be evicted before the timer fires, which would leave
- * money stuck in expired duels or Hokm lobbies. This sweep is the reliable
- * backstop — it finds expired rows in D1, refunds them and edits the
- * Telegram messages.
+ * expired duels stuck in the DB. This sweep is the reliable backstop — it
+ * finds expired rows in D1, deletes them and edits the Telegram messages.
+ *
+ * Note: no points are escrowed at duel creation (both players are debited at
+ * accept time), so there is nothing to refund here — just cleanup.
  */
 export async function sweepExpiredDuels(db: D1Database, token: string): Promise<number> {
   const now = Math.floor(Date.now() / 1000);
@@ -33,8 +40,9 @@ export async function sweepExpiredDuels(db: D1Database, token: string): Promise<
 
   if (!rows.results.length) return 0;
 
-  // D1 batch() is capped at 100 statements — chunk the deletes just in case.
-  const chunkSize = 100;
+  // D1 batch() caps at 100 statements, and the Free plan caps D1 at 50
+  // queries per invocation (each statement counts) — chunk at 40.
+  const chunkSize = 40;
   for (let i = 0; i < rows.results.length; i += chunkSize) {
     const chunk = rows.results.slice(i, i + chunkSize);
     await db.batch(chunk.map((d) => db.prepare(`DELETE FROM active_duels WHERE duel_id = ?`).bind(d.duel_id)));
@@ -58,40 +66,39 @@ export async function sweepExpiredDuels(db: D1Database, token: string): Promise<
   return edited;
 }
 
-export async function sweepExpiredHokmLobbies(db: D1Database, token: string): Promise<number> {
-  const now = Math.floor(Date.now() / 1000);
-  const cutoff = now - HOKM_LOBBY_TIMEOUT_SEC;
+export async function runSweep(db: D1Database, token: string): Promise<{ duels: number; titleAuctions: number; dueAuctions: number; repostedAuctions: number; recoveredSettling: number }> {
+  if (!token) return { duels: 0, titleAuctions: 0, dueAuctions: 0, repostedAuctions: 0, recoveredSettling: 0 };
 
-  const rows = await db
-    .prepare(
-      `SELECT game_id, group_id, board_msg_id
-       FROM hokm_games WHERE status = 'lobby' AND created_at < ?`
-    )
-    .bind(cutoff)
-    .all<{ game_id: string; group_id: number; board_msg_id: number | null }>();
-
-  let cancelled = 0;
-  for (const g of rows.results) {
-    await cancelHokmGame(db, g.game_id);
-    cancelled++;
-    if (g.board_msg_id) {
-      await editMessageText(
-        token,
-        g.group_id,
-        g.board_msg_id,
-        `⏱️ <b>بازی حکم منقضی شد!</b>\n\nهیچ‌کس دیگه‌ای نیومد. مبلغ‌ها برگشت.`
-      );
+  // Each step is independent: a failure in one must not kill the sweep for the
+  // rest (a stuck auction already costs money — a crashed step would too).
+  const step = async (fn: () => Promise<number>, label: string): Promise<number> => {
+    try {
+      return await fn();
+    } catch (err) {
+      console.error(`[sweep] ${label} failed`, err);
+      return 0;
     }
-  }
-  return cancelled;
-}
+  };
 
-export async function runSweep(db: D1Database, token: string): Promise<{ duels: number; lobbies: number }> {
-  if (!token) return { duels: 0, lobbies: 0 };
-  const duels = await sweepExpiredDuels(db, token);
-  const lobbies = await sweepExpiredHokmLobbies(db, token);
-  if (duels > 0 || lobbies > 0) {
-    console.log(`[sweep] expired duels: ${duels}, hokm lobbies: ${lobbies}`);
+  const duels = await step(() => sweepExpiredDuels(db, token), "duels");
+  if (duels > 0) {
+    console.log(`[sweep] expired duels: ${duels}`);
   }
-  return { duels, lobbies };
+  const titleAuctions = await step(() => sweepPendingSellerAuctions(db, token), "pending seller auctions");
+  if (titleAuctions > 0) {
+    console.log(`[sweep] cancelled title auctions: ${titleAuctions}`);
+  }
+  const recoveredSettling = await step(() => recoverStuckSettlingAuctions(db, token), "stuck settling auctions");
+  if (recoveredSettling > 0) {
+    console.log(`[sweep] recovered stuck settling auctions: ${recoveredSettling}`);
+  }
+  const dueAuctions = await step(() => sweepDueTitleAuctions(db, token), "due title auctions");
+  if (dueAuctions > 0) {
+    console.log(`[sweep] finished title auctions: ${dueAuctions}`);
+  }
+  const repostedAuctions = await step(() => sweepRepostAuctions(db, token), "title auction boards");
+  if (repostedAuctions > 0) {
+    console.log(`[sweep] reposted title auction boards: ${repostedAuctions}`);
+  }
+  return { duels, titleAuctions, dueAuctions, repostedAuctions, recoveredSettling };
 }

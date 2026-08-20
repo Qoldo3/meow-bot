@@ -46,8 +46,9 @@ export async function getDuel(db: D1Database, duelId: string): Promise<DuelState
   };
 }
 
-export async function deleteDuel(db: D1Database, duelId: string): Promise<void> {
-  await db.prepare(`DELETE FROM active_duels WHERE duel_id = ?`).bind(duelId).run();
+export async function deleteDuel(db: D1Database, duelId: string): Promise<boolean> {
+  const result = await db.prepare(`DELETE FROM active_duels WHERE duel_id = ?`).bind(duelId).run();
+  return result.meta.changes > 0;
 }
 
 export async function findOpenDuelAgainst(db: D1Database, groupId: number, targetId: number): Promise<string | undefined> {

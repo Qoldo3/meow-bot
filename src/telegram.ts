@@ -86,13 +86,3 @@ export async function isGroupAdmin(
   const status = res.result?.status;
   return status === "administrator" || status === "creator";
 }
-
-export function buildCallbackQueryMessage(callback: TelegramCallbackQuery, text: string): TelegramMessage | undefined {
-  if (!callback.message) return undefined;
-  return {
-    message_id: callback.message.message_id,
-    from: callback.from,
-    chat: callback.message.chat,
-    text,
-  };
-}

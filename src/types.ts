@@ -10,14 +10,9 @@ export type Bindings = {
   BOT_OWNER_ID: string;
   WEBHOOK_SECRET: string;
   CACHE?: KVNamespace;
-  HOKM_GAME: DurableObjectNamespace;
-  HOKM_APP_URL?: string;
   MEOW_VIP_USER_ID?: string;
-  HOKM_JOIN_TIMEOUT_SEC?: number;
-  HOKM_LOBBY_TIMEOUT_SEC?: number;
-  HOKM_TURN_TIMEOUT_SEC?: number;
-  HOKM_TRUMP_TIMEOUT_SEC?: number;
-  HOKM_AFK_STRIKES?: number;
+  POKER_GAME: DurableObjectNamespace;
+  BLACKJACK_GAME: DurableObjectNamespace;
 };
 
 export type TelegramUser = {
@@ -39,6 +34,7 @@ export type TelegramMessage = {
   chat: TelegramChat;
   text?: string;
   reply_to_message?: {
+    message_id?: number;
     from?: TelegramUser;
     text?: string;
   };
@@ -86,77 +82,214 @@ export type DuelState = {
   createdAt: number;
 };
 
-export type HokmSuit = "S" | "H" | "D" | "C";
+import type { Card } from "./poker";
 
-export type HokmPhase =
-  | "waiting_join"
-  | "drawing_hakem"
-  | "trump_call"
-  | "playing"
-  | "hand_over"
-  | "match_over"
-  | "cancelled";
+export type PokerStage = "lobby" | "preflop" | "flop" | "turn" | "river" | "showdown" | "ended";
 
-export interface HokmSeatInfo {
+export type PokerSeat = {
+  index: number;
   userId: number;
   name: string;
-  seat: number;
-}
+  chips: number;
+  holeCards: Card[];
+  folded: boolean;
+  allIn: boolean;
+  hasActed: boolean;
+  totalBetThisHand: number;
+  committedThisStreet: number;
+  lastAction: string;
+  isBot: boolean;
+  pendingDeal: boolean;
+  /** Set when the player cashed out between rounds; they no longer play. */
+  left: boolean;
+};
 
-export interface HokmGameState {
-  v: 1;
+export type PokerGameState = {
+  v: number;
   gameId: string;
   groupId: number;
-  bet: number;
-  perPlayer: number;
-  boardMsgId: number | null;
-  appUrl: string;
-  phase: HokmPhase;
-  seats: (HokmSeatInfo | null)[];
-  hands: Record<number, string[]>;
-  firstFive: string[];
-  trumpSuit: HokmSuit | null;
-  hakemSeat: number | null;
-  leaderSeat: number | null;
-  currentSeat: number | null;
-  trickPlays: Array<{ seat: number; card: string }>;
-  trickWinnerSeat: number | null;
-  tricksWon: number[];
-  handScores: [number, number];
-  matchScores: [number, number];
-  handWinnerTeam: number | null;
-  handPoints: number | null;
+  messageId: number;
+  hostId: number;
+  buyIn: number;
+  /** Real escrowed money still at stake (bots add no real chips). */
+  realPot: number;
+  seats: PokerSeat[];
+  deck: Card[];
+  board: Card[];
+  pot: number;
+  stage: PokerStage;
+  currentTurn: number | null;
+  actionDeadline: number | null;
+  currentBet: number;
+  lastRaiseSize: number;
+  /** Raise-to amount being drafted in the confirm panel (null = no draft). */
+  draft: number | null;
+  dealerIndex: number;
   handNumber: number;
-  strikes: number[];
-  turnDeadline: number | null;
-  alarmKind: "join" | "draw" | "deal" | "trump" | "turn" | null;
-  drawOrder: string[];
-  drawIndex: number;
-  result: string | null;
-  winnerTeam: number | null;
-}
+  lobbyDeadline: number;
+  /** Deadline for the between-rounds break (next hand starts at this time). */
+  breakDeadline: number | null;
+  alarmKind: "lobby" | "turn" | "break" | null;
+  /** Monotonic counter for bot user ids so leaving players never collide with new bots. */
+  nextBotId: number;
+  cancelled: boolean;
+  lastActionText: string;
+  resultText: string | null;
+  winnerIds: number[] | null;
+  endedAt: number | null;
+};
 
-export interface PublicHokmState {
-  phase: HokmPhase;
-  seats: (HokmSeatInfo | null)[];
-  connected: number[];
-  trumpSuit: HokmSuit | null;
-  hakemSeat: number | null;
-  leaderSeat: number | null;
-  currentSeat: number | null;
-  trickPlays: Array<{ seat: number; card: string }>;
-  trickWinnerSeat: number | null;
-  tricksWon: number[];
-  handScores: [number, number];
-  matchScores: [number, number];
-  handWinnerTeam: number | null;
-  handPoints: number | null;
-  handNumber: number;
-  strikes: number[];
-  turnDeadline: number | null;
+// ---------------------------------------------------------------------------
+// Blackjack (بلکجک) — the group treasury is the house bank.
+// ---------------------------------------------------------------------------
+
+export type BlackjackStage = "lobby" | "betting" | "playing" | "dealer" | "settled" | "ended";
+
+/**
+ * single: everyone's cards are face-up on the shared group table (classic
+ *         mini-baccarat style blackjack — each player vs the dealer).
+ * multi: each player's hand is hidden and shown only in their private chat
+ *        with the bot (PV); the group table shows only the dealer's cards.
+ */
+export type BlackjackMode = "single" | "multi";
+
+export type BlackjackHandResult =
+  | "pending" // still being played
+  | "stand" // player finished drawing; awaits settlement
+  | "natural" // natural blackjack on the first two cards
+  | "bust"
+  | "win"
+  | "loss"
+  | "push";
+
+export type BlackjackHand = {
+  cards: Card[];
+  /** Current bet on this hand (doubled hands carry the doubled amount). */
   bet: number;
-  perPlayer: number;
-  result: string | null;
-  winnerTeam: number | null;
-  drawIndex: number;
-}
+  doubled: boolean;
+  fromSplit: boolean;
+  result: BlackjackHandResult;
+};
+
+export type BlackjackSeat = {
+  index: number;
+  userId: number;
+  name: string;
+  chips: number;
+  /** Draft bet being adjusted in the bet panel (null = no draft). */
+  draft: number | null;
+  /** null = hasn't acted this round; 0 = skipped; >0 = bet placed. */
+  pendingBet: number | null;
+  hands: BlackjackHand[];
+  lastAction: string;
+  /** Cashed out between rounds; no longer plays. */
+  left: boolean;
+  /** Ran out of chips; eliminated (can rebuy between rounds). */
+  busted: boolean;
+  /** Message id of the player's private hand message (multi mode only). */
+  pvMsgId: number | null;
+};
+
+export type BlackjackGameState = {
+  v: number;
+  gameId: string;
+  groupId: number;
+  messageId: number;
+  /** The handler's "game created" confirmation message; deleted when play starts. */
+  noticeMsgId: number | null;
+  hostId: number;
+  buyIn: number;
+  seats: BlackjackSeat[];
+  /** single (all cards face-up in the group) | multi (hidden hands via PV). */
+  mode: BlackjackMode;
+  deck: Card[];
+  /** Cards already drawn this round; reshuffled into the deck when it runs low. */
+  discard: Card[];
+  dealerCards: Card[];
+  dealerHoleRevealed: boolean;
+  stage: BlackjackStage;
+  roundNumber: number;
+  currentSeat: number | null;
+  currentHand: number | null;
+  actionDeadline: number | null;
+  betDeadline: number | null;
+  lobbyDeadline: number;
+  breakDeadline: number | null;
+  alarmKind: "lobby" | "bet" | "turn" | "dealer" | "break" | null;
+  cancelled: boolean;
+  lastActionText: string;
+  resultText: string | null;
+  endedAt: number | null;
+};
+
+export type PublicBlackjackState = {
+  gameId: string;
+  groupId: number;
+  messageId: number;
+  stage: BlackjackStage;
+  mode: BlackjackMode;
+  buyIn: number;
+  roundNumber: number;
+  dealerCards: Card[];
+  dealerHoleRevealed: boolean;
+  currentSeat: number | null;
+  currentHand: number | null;
+  actionDeadline: number | null;
+  betDeadline: number | null;
+  lobbyDeadline: number;
+  breakDeadline: number | null;
+  hostId: number;
+  cancelled: boolean;
+  seats: Array<{
+    index: number;
+    userId: number;
+    name: string;
+    chips: number;
+    draft: number | null;
+    pendingBet: number | null;
+    hands: BlackjackHand[];
+    lastAction: string;
+    left: boolean;
+    busted: boolean;
+  }>;
+  lastActionText: string;
+  resultText: string | null;
+  endedAt: number | null;
+};
+
+export type PublicPokerState = {
+  gameId: string;
+  groupId: number;
+  messageId: number;
+  stage: PokerStage;
+  buyIn: number;
+  pot: number;
+  board: Card[];
+  currentBet: number;
+  lastRaiseSize: number;
+  /** Raise-to amount being drafted in the confirm panel (null = no draft). */
+  draft: number | null;
+  currentTurn: number | null;
+  actionDeadline: number | null;
+  handNumber: number;
+  hostId: number;
+  cancelled: boolean;
+  seats: Array<{
+    index: number;
+    userId: number;
+    name: string;
+    chips: number;
+    holeCardCount: number;
+    folded: boolean;
+    allIn: boolean;
+    hasActed: boolean;
+    committedThisStreet: number;
+    lastAction: string;
+    isBot: boolean;
+    pendingDeal: boolean;
+    left: boolean;
+  }>;
+  lastActionText: string;
+  resultText: string | null;
+  winnerIds: number[] | null;
+};

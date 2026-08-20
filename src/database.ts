@@ -1,4 +1,6 @@
 import { TelegramChat, TelegramUser } from "./types";
+import { tehranDayStart } from "./utils";
+import { BOOSTER_COOLDOWN_SEC } from "./constants";
 
 export async function ensureUser(db: D1Database, user: TelegramUser) {
   const now = Math.floor(Date.now() / 1000);
@@ -144,14 +146,15 @@ export async function distributeGroupTax(db: D1Database, groupId: number, type: 
   const treasuryAmount = Math.floor(amount * 0.75);
   const lotteryAmount = amount - treasuryAmount;
   const now = Math.floor(Date.now() / 1000);
-  // Read current treasury for ledger
+  // Read current treasury for the ledger row (approximate under concurrency —
+  // the UPDATE itself uses a delta so concurrent writers can't lose updates).
   const before = await db.prepare(`SELECT treasury_balance FROM telegram_groups WHERE telegram_group_id = ?`).bind(groupId).first<{ treasury_balance: number }>();
   const balanceBefore = before?.treasury_balance ?? 0;
   const balanceAfter = balanceBefore + treasuryAmount;
 
   // Update tax counter, lottery pot and treasury atomically (batch)
   await db.batch([
-    db.prepare(`UPDATE telegram_groups SET ${field} = COALESCE(${field},0) + ?, lottery_pot = COALESCE(lottery_pot,0) + ?, treasury_balance = ? WHERE telegram_group_id = ?`).bind(amount, lotteryAmount, balanceAfter, groupId),
+    db.prepare(`UPDATE telegram_groups SET ${field} = COALESCE(${field},0) + ?, lottery_pot = COALESCE(lottery_pot,0) + ?, treasury_balance = COALESCE(treasury_balance,0) + ? WHERE telegram_group_id = ?`).bind(amount, lotteryAmount, treasuryAmount, groupId),
     db.prepare(`INSERT INTO group_treasury_transactions (telegram_group_id, telegram_user_id, amount, balance_before, balance_after, reason, reference_type, reference_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind(groupId, null, treasuryAmount, balanceBefore, balanceAfter, `tax:${type}`, 'tax', null, now),
   ]);
@@ -171,13 +174,16 @@ export async function startLotteryRound(db: D1Database, groupId: number, ticketP
   return res.meta?.last_row_id ?? null;
 }
 
+export type LotteryPurchaseResult =
+  | { success: true; roundId: number; numbers: string[]; allocated: number }
+  | { success: false; reason: string };
+
 export async function purchaseLotteryTickets(
   db: D1Database,
   groupId: number,
   userId: number,
-  ticketCount: number,
-  numbersList: string[] | null = null
-) {
+  ticketCount: number
+): Promise<LotteryPurchaseResult> {
   if (ticketCount <= 0) return { success: false, reason: 'invalid_count' };
 
   // find open round
@@ -191,39 +197,61 @@ export async function purchaseLotteryTickets(
   const ticketPrice = round!.ticket_price;
   const totalCost = ticketPrice * ticketCount;
 
-  const now = Math.floor(Date.now() / 1000);
-  // Distribute funds: 75% lottery, 25% treasury
-  const lotteryContribution = Math.floor(totalCost * 0.75);
-  const treasuryContribution = totalCost - lotteryContribution;
+  // Debit first with a guarded write. D1 batches roll back on SQL errors, but
+  // a zero-row UPDATE is still a successful statement, so putting this guard
+  // next to ticket inserts would mint tickets for insufficient-funds users.
+  const debit = await db.prepare(
+    `UPDATE group_members SET meow_points = meow_points - ?
+     WHERE telegram_group_id = ? AND telegram_user_id = ? AND meow_points >= ?`
+  ).bind(totalCost, groupId, userId, totalCost).run();
+  if (!debit || debit.meta.changes === 0) return { success: false, reason: 'insufficient_funds' };
 
-  // Read current treasury balance for ledger
-  const before = await db.prepare(`SELECT treasury_balance FROM telegram_groups WHERE telegram_group_id = ?`).bind(groupId).first<{ treasury_balance: number }>();
-  const balanceBefore = before?.treasury_balance ?? 0;
-  const balanceAfter = balanceBefore + treasuryContribution;
+  try {
+    // The user's own pending free tickets (earned by meowing) — read BEFORE
+    // allocation zeroes the counter, so the caller can report exactly what
+    // was registered for them (allocatePendingLotteryTickets also registers
+    // other members' tickets, which must not be shown as the buyer's).
+    const pendingMine = await db
+      .prepare(`SELECT lottery_bonus_tickets FROM group_members WHERE telegram_group_id = ? AND telegram_user_id = ?`)
+      .bind(groupId, userId)
+      .first<{ lottery_bonus_tickets: number }>();
+    const allocated = await allocatePendingLotteryTickets(db, groupId);
 
-  // Build batch: guarded deduction, ticket inserts, counters update, treasury update and ledger
-  const assignedNumbers: string[] = [];
-  const stmts: any[] = [];
-  stmts.push(db.prepare(`UPDATE group_members SET meow_points = meow_points - ? WHERE telegram_group_id = ? AND telegram_user_id = ? AND meow_points >= ?`).bind(totalCost, groupId, userId, totalCost));
-  for (let i = 0; i < ticketCount; i++) {
-    const numbers = numbersList && numbersList[i] ? numbersList[i] : (() => {
+    const now = Math.floor(Date.now() / 1000);
+    // Distribute funds: 75% lottery, 25% treasury
+    const lotteryContribution = Math.floor(totalCost * 0.75);
+    const treasuryContribution = totalCost - lotteryContribution;
+
+    // Read current treasury balance for ledger
+    const before = await db.prepare(`SELECT treasury_balance FROM telegram_groups WHERE telegram_group_id = ?`).bind(groupId).first<{ treasury_balance: number }>();
+    const balanceBefore = before?.treasury_balance ?? 0;
+    const balanceAfter = balanceBefore + treasuryContribution;
+
+    const assignedNumbers: string[] = [];
+    const stmts: any[] = [];
+    for (let i = 0; i < ticketCount; i++) {
       const nums = new Set<number>();
       while (nums.size < 6) nums.add(Math.floor(Math.random() * 49) + 1);
-      return Array.from(nums).join(',');
-    })();
-    assignedNumbers.push(numbers);
-    stmts.push(db.prepare(`INSERT INTO lottery_tickets (lottery_round_id, telegram_group_id, telegram_user_id, numbers, amount_paid, purchased_at) VALUES (?, ?, ?, ?, ?, ?)`)
-      .bind(round!.id, groupId, userId, numbers, ticketPrice, now));
+      const numbers = Array.from(nums).join(',');
+      assignedNumbers.push(numbers);
+      stmts.push(db.prepare(`INSERT INTO lottery_tickets (lottery_round_id, telegram_group_id, telegram_user_id, numbers, amount_paid, purchased_at) VALUES (?, ?, ?, ?, ?, ?)`)
+        .bind(round!.id, groupId, userId, numbers, ticketPrice, now));
+    }
+
+    stmts.push(db.prepare(`UPDATE telegram_groups SET lottery_ticket_sales = COALESCE(lottery_ticket_sales,0) + ?, lottery_pot = COALESCE(lottery_pot,0) + ?, treasury_balance = COALESCE(treasury_balance,0) + ? WHERE telegram_group_id = ?`).bind(ticketCount, lotteryContribution, treasuryContribution, groupId));
+    stmts.push(db.prepare(`INSERT INTO group_treasury_transactions (telegram_group_id, telegram_user_id, amount, balance_before, balance_after, reason, reference_type, reference_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .bind(groupId, userId, treasuryContribution, balanceBefore, balanceAfter, 'lottery_ticket', 'lottery_round', String(round!.id), now));
+
+    await db.batch(stmts);
+
+    return { success: true, roundId: round!.id, numbers: assignedNumbers, allocated: Math.max(0, pendingMine?.lottery_bonus_tickets ?? 0) };
+  } catch (err) {
+    // The debit is a separate guarded write so compensate if a later SQL
+    // statement fails. The batch itself remains atomic for its own statements.
+    await db.prepare(`UPDATE group_members SET meow_points = meow_points + ? WHERE telegram_group_id = ? AND telegram_user_id = ?`)
+      .bind(totalCost, groupId, userId).run();
+    throw err;
   }
-
-  stmts.push(db.prepare(`UPDATE telegram_groups SET lottery_ticket_sales = COALESCE(lottery_ticket_sales,0) + ?, lottery_pot = COALESCE(lottery_pot,0) + ?, treasury_balance = ? WHERE telegram_group_id = ?`).bind(ticketCount, lotteryContribution, balanceAfter, groupId));
-  stmts.push(db.prepare(`INSERT INTO group_treasury_transactions (telegram_group_id, telegram_user_id, amount, balance_before, balance_after, reason, reference_type, reference_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .bind(groupId, userId, treasuryContribution, balanceBefore, balanceAfter, 'lottery_ticket', 'lottery_round', String(round!.id), now));
-
-  const res = await db.batch(stmts);
-  // Ensure deduction succeeded
-  if (!res || res.length === 0 || res[0].meta.changes === 0) return { success: false, reason: 'insufficient_funds' };
-  return { success: true, roundId: round!.id, numbers: assignedNumbers };
 }
 
 export async function allocatePendingLotteryTickets(db: D1Database, groupId: number) {
@@ -258,7 +286,14 @@ export async function allocatePendingLotteryTickets(db: D1Database, groupId: num
   }
 
   if (stmts.length > 0) {
-    await db.batch(stmts);
+    // A heavy meower can hold >100 pending tickets; D1 batch() caps at 100
+    // statements, so chunk (same pattern as sweep.ts).
+// D1 caps queries at 50 per invocation on the Free plan (each batch statement
+// counts as one) — keep batches ≤40 so surrounding queries stay under it.
+  const chunkSize = 40;
+  for (let i = 0; i < stmts.length; i += chunkSize) {
+    await db.batch(stmts.slice(i, i + chunkSize));
+  }
   }
 
   return totalAllocated;
@@ -296,11 +331,22 @@ export function calculateLotteryPayouts(pot: number, winnersByTier: { [k: number
   const payouts: Array<{ ticketId?: number; userId: number; amount: number; matchCount: number; numbers: string; displayName: string }> = [];
   let totalPaid = 0;
 
+  // Tiers can co-occur (e.g. 3- and 4-match winners in the same draw), so the
+  // raw tier amounts may exceed the pot. Compute them all first, then scale
+  // proportionally so the payout never overcommits the pot.
+  const tiers: Array<{ matchCount: number; amount: number; winners: typeof winnersByTier[number] }> = [];
+  let rawTotal = 0;
   for (const matchCount of [3, 4, 5, 6]) {
     const winners = winnersByTier[matchCount] || [];
     if (winners.length === 0) continue;
-
     const tierAmount = Math.floor(pot * (tierPercents[matchCount] ?? 0));
+    tiers.push({ matchCount, amount: tierAmount, winners });
+    rawTotal += tierAmount;
+  }
+  const scale = rawTotal > pot && pot > 0 ? pot / rawTotal : 1;
+
+  for (const { matchCount, amount, winners } of tiers) {
+    const tierAmount = Math.floor(amount * scale);
     const perWinner = Math.floor(tierAmount / winners.length);
 
     for (const winner of winners) {
@@ -319,7 +365,7 @@ export function calculateLotteryPayouts(pot: number, winnersByTier: { [k: number
   return { payouts, totalPaid };
 }
 
-export async function drawLotteryRound(db: D1Database, roundId: number, groupId: number, initiatedByUserId: number | null = null) {
+export async function drawLotteryRound(db: D1Database, roundId: number, groupId: number) {
   const round = await db.prepare(`SELECT id, ticket_price, status, round_number FROM lottery_rounds WHERE id = ? AND telegram_group_id = ?`).bind(roundId, groupId).first<{ id: number; ticket_price: number; status: string; round_number: number }>();
   if (!round) return { success: false, reason: 'not_found' };
   if (round.status !== 'open') return { success: false, reason: 'not_open' };
@@ -371,7 +417,7 @@ export async function drawLotteryRound(db: D1Database, roundId: number, groupId:
       return { success: false, reason: 'insufficient_pot' };
     }
 
-    // pay winners
+    // pay winners (3 stmts each — chunk for D1's 100-statement batch cap)
     const stmts: any[] = [];
     for (const p of payouts) {
       const tierPct = Math.round((tierPercents[p.matchCount] ?? 0) * 100);
@@ -380,8 +426,11 @@ export async function drawLotteryRound(db: D1Database, roundId: number, groupId:
       stmts.push(db.prepare(`UPDATE group_members SET meow_points = meow_points + ? WHERE telegram_group_id = ? AND telegram_user_id = ?`).bind(p.amount, groupId, p.userId));
       stmts.push(db.prepare(`INSERT INTO transactions (telegram_user_id, group_id, amount, reason, created_at) VALUES (?, ?, ?, ?, ?)`).bind(p.userId, groupId, p.amount, 'lottery_payout', now));
     }
-
-    await db.batch(stmts);
+// Free-plan D1 cap is 50 queries per invocation (each batch statement counts
+  // as one) — chunk at 40 to leave headroom for the queries before the batch.
+  for (let i = 0; i < stmts.length; i += 40) {
+    await db.batch(stmts.slice(i, i + 40));
+  }
   }
 
   const winners = payouts.map((p) => ({ userId: p.userId, ticketId: p.ticketId, numbers: p.numbers, payout: p.amount, matchCount: p.matchCount, displayName: p.displayName }));
@@ -401,138 +450,6 @@ export async function getRecentGroupTreasuryTransactions(db: D1Database, groupId
     .prepare(`SELECT telegram_user_id, amount, reason, created_at FROM group_treasury_transactions WHERE telegram_group_id = ? ORDER BY created_at DESC LIMIT ?`)
     .bind(groupId, limit)
     .all<{ telegram_user_id: number | null; amount: number; reason: string; created_at: number }>();
-}
-
-export async function getGroupClanByName(db: D1Database, groupId: number, name: string) {
-  return db
-    .prepare(`SELECT clan_id, telegram_group_id, name, owner_user_id, treasury_balance, created_at FROM group_clans WHERE telegram_group_id = ? AND name = ? COLLATE NOCASE`)
-    .bind(groupId, name)
-    .first<{
-      clan_id: number;
-      telegram_group_id: number;
-      name: string;
-      owner_user_id: number;
-      treasury_balance: number;
-      created_at: number;
-    }>();
-}
-
-export async function getGroupClanById(db: D1Database, clanId: number) {
-  return db
-    .prepare(`SELECT clan_id, telegram_group_id, name, owner_user_id, treasury_balance, created_at FROM group_clans WHERE clan_id = ?`)
-    .bind(clanId)
-    .first<{
-      clan_id: number;
-      telegram_group_id: number;
-      name: string;
-      owner_user_id: number;
-      treasury_balance: number;
-      created_at: number;
-    }>();
-}
-
-export async function getUserClan(db: D1Database, groupId: number, userId: number) {
-  return db
-    .prepare(`
-      SELECT c.clan_id, c.name, c.owner_user_id, c.treasury_balance, m.role, m.joined_at
-      FROM clan_members m
-      JOIN group_clans c ON c.clan_id = m.clan_id
-      WHERE c.telegram_group_id = ? AND m.telegram_user_id = ?
-    `)
-    .bind(groupId, userId)
-    .first<{
-      clan_id: number;
-      name: string;
-      owner_user_id: number;
-      treasury_balance: number;
-      role: string;
-      joined_at: number;
-    }>();
-}
-
-export async function createGroupClan(db: D1Database, groupId: number, name: string, ownerUserId: number): Promise<number | null> {
-  const existing = await getGroupClanByName(db, groupId, name);
-  if (existing) return null;
-  // Enforce one clan membership per user per group.
-  const alreadyInClan = await db
-    .prepare(`
-      SELECT 1 FROM clan_members m
-      JOIN group_clans c ON c.clan_id = m.clan_id
-      WHERE c.telegram_group_id = ? AND m.telegram_user_id = ?
-    `)
-    .bind(groupId, ownerUserId)
-    .first<{ "1": number }>();
-  if (alreadyInClan) return null;
-  const now = Math.floor(Date.now() / 1000);
-  const result = await db
-    .prepare(`INSERT INTO group_clans (telegram_group_id, name, owner_user_id, treasury_balance, created_at) VALUES (?, ?, ?, 0, ?)`)
-    .bind(groupId, name, ownerUserId, now)
-    .run();
-  return result.meta?.last_row_id ?? null;
-}
-
-export async function joinClan(db: D1Database, clanId: number, userId: number): Promise<boolean> {
-  const existing = await db
-    .prepare(`SELECT 1 FROM clan_members WHERE clan_id = ? AND telegram_user_id = ?`)
-    .bind(clanId, userId)
-    .first<{ '1': number }>();
-  if (existing) return false;
-  // Enforce one clan membership per user per group.
-  const clan = await getGroupClanById(db, clanId);
-  if (!clan) return false;
-  const otherClan = await db
-    .prepare(`
-      SELECT 1 FROM clan_members m
-      JOIN group_clans c ON c.clan_id = m.clan_id
-      WHERE c.telegram_group_id = ? AND m.telegram_user_id = ?
-    `)
-    .bind(clan.telegram_group_id, userId)
-    .first<{ '1': number }>();
-  if (otherClan) return false;
-  const now = Math.floor(Date.now() / 1000);
-  await db.prepare(`INSERT INTO clan_members (clan_id, telegram_user_id, role, joined_at) VALUES (?, ?, 'member', ?)`)
-    .bind(clanId, userId, now)
-    .run();
-  return true;
-}
-
-export async function leaveClan(db: D1Database, clanId: number, userId: number): Promise<boolean> {
-  const clan = await getGroupClanById(db, clanId);
-  if (!clan) return false;
-
-  if (clan.owner_user_id === userId) {
-    await db.batch([
-      db.prepare(`DELETE FROM clan_members WHERE clan_id = ?`).bind(clanId),
-      db.prepare(`DELETE FROM group_clans WHERE clan_id = ?`).bind(clanId),
-    ]);
-    return true;
-  }
-
-  const result = await db
-    .prepare(`DELETE FROM clan_members WHERE clan_id = ? AND telegram_user_id = ?`)
-    .bind(clanId, userId)
-    .run();
-  return result.meta.changes > 0;
-}
-
-export async function getClanMembers(db: D1Database, clanId: number) {
-  return db
-    .prepare(`SELECT telegram_user_id, role, joined_at FROM clan_members WHERE clan_id = ? ORDER BY joined_at ASC`)
-    .bind(clanId)
-    .all<{ telegram_user_id: number; role: string; joined_at: number }>();
-}
-
-export async function getGroupClans(db: D1Database, groupId: number) {
-  return db
-    .prepare(`SELECT clan_id, name, owner_user_id, treasury_balance, created_at FROM group_clans WHERE telegram_group_id = ? ORDER BY created_at ASC`)
-    .bind(groupId)
-    .all<{
-      clan_id: number;
-      name: string;
-      owner_user_id: number;
-      treasury_balance: number;
-      created_at: number;
-    }>();
 }
 
 export async function setGroupLotteryTicketPrice(db: D1Database, groupId: number, price: number) {
@@ -580,7 +497,9 @@ export async function getGroupRank(db: D1Database, groupId: number, userId: numb
 }
 
 export async function getGroupDailyLeaderboard(db: D1Database, groupId: number, limit: number = 10) {
-  const today = Math.floor(new Date().setHours(0, 0, 0, 0) / 1000);
+  // "Today" is Tehran midnight (UTC+3:30), not UTC midnight — meows after
+  // 20:30 UTC belong to the next Tehran day.
+  const today = tehranDayStart();
   return db
     .prepare(`
       SELECT u.first_name, u.username, SUM(t.amount) AS today_points
@@ -593,17 +512,6 @@ export async function getGroupDailyLeaderboard(db: D1Database, groupId: number, 
     `)
     .bind(groupId, today, limit)
     .all<{ first_name: string; username: string | null; today_points: number }>();
-}
-
-export async function getGlobalRank(db: D1Database, userId: number): Promise<number> {
-  const result = await db
-    .prepare(`
-      SELECT COUNT(*) + 1 AS rank FROM users
-      WHERE meow_points > (SELECT meow_points FROM users WHERE telegram_id = ?)
-    `)
-    .bind(userId)
-    .first<{ rank: number }>();
-  return result?.rank ?? 0;
 }
 
 export async function isMaintenanceMode(db: D1Database): Promise<boolean> {
@@ -620,9 +528,9 @@ export async function findUserByUsername(db: D1Database, rawUsername: string) {
 
 export async function findUserById(db: D1Database, userId: number) {
   return db
-    .prepare(`SELECT telegram_id, username, first_name, meow_points, total_meows, daily_streak, last_daily_at, created_at FROM users WHERE telegram_id = ?`)
+    .prepare(`SELECT telegram_id, username, first_name, meow_points, total_meows, created_at FROM users WHERE telegram_id = ?`)
     .bind(userId)
-    .first<{ telegram_id: number; username: string | null; first_name: string; meow_points: number; total_meows: number; daily_streak: number; last_daily_at: number | null; created_at: number }>();
+    .first<{ telegram_id: number; username: string | null; first_name: string; meow_points: number; total_meows: number; created_at: number }>();
 }
 
 export async function getDuelRating(db: D1Database, userId: number, groupId?: number): Promise<number> {
@@ -640,6 +548,25 @@ export async function getDuelLeaderboard(db: D1Database, groupId: number, limit:
     .prepare(`SELECT first_name, username, duel_rating FROM group_members WHERE telegram_group_id = ? ORDER BY duel_rating DESC LIMIT ?`)
     .bind(groupId, limit)
     .all<{ first_name: string; username: string | null; duel_rating: number }>();
+}
+
+/** The user's active title in a group (or null when they have none set). */
+export async function getActiveTitle(
+  db: D1Database,
+  groupId: number,
+  userId: number
+): Promise<{ name: string; last_price: number | null; emoji: string | null } | null> {
+  const row = await db
+    .prepare(`
+      SELECT t.name, t.last_price, t.emoji
+      FROM titles t
+      JOIN group_members gm ON gm.active_title_id = t.id
+      WHERE gm.telegram_group_id = ? AND gm.telegram_user_id = ?
+        AND t.telegram_group_id = gm.telegram_group_id
+    `)
+    .bind(groupId, userId)
+    .first<{ name: string; last_price: number | null; emoji: string | null }>();
+  return row ?? null;
 }
 
 export async function isUserBanned(db: D1Database, userId: number): Promise<boolean> {
@@ -696,6 +623,8 @@ export async function getUserGroupMemberships(db: D1Database, userId: number) {
 }
 
 export async function applyPayTransfer(db: D1Database, fromUserId: number, toUserId: number, amount: number, groupId: number, now: number): Promise<boolean> {
+  if (fromUserId === toUserId || !Number.isInteger(amount) || amount <= 0) return false;
+
   const sender = await db
     .prepare(`SELECT meow_points FROM users WHERE telegram_id = ?`)
     .bind(fromUserId)
@@ -715,16 +644,179 @@ export async function applyPayTransfer(db: D1Database, fromUserId: number, toUse
     return false;
   }
 
-  const results = await db.batch([
+  // Debit both sender balances first. A zero-row guarded UPDATE is not a SQL
+  // error in D1, so never credit the receiver until both debits are confirmed.
+  const debits = await db.batch([
     db.prepare(`UPDATE users SET meow_points = meow_points - ? WHERE telegram_id = ? AND meow_points >= ?`).bind(amount, fromUserId, amount),
-    db.prepare(`UPDATE users SET meow_points = meow_points + ? WHERE telegram_id = ?`).bind(amount, toUserId),
     db.prepare(`UPDATE group_members SET meow_points = meow_points - ? WHERE telegram_group_id = ? AND telegram_user_id = ? AND meow_points >= ?`).bind(amount, groupId, fromUserId, amount),
-    db.prepare(`UPDATE group_members SET meow_points = meow_points + ? WHERE telegram_group_id = ? AND telegram_user_id = ?`).bind(amount, groupId, toUserId),
+  ]);
+  if (debits[0].meta.changes === 0 || debits[1].meta.changes === 0) {
+    const refunds: any[] = [];
+    if (debits[0].meta.changes > 0) refunds.push(db.prepare(`UPDATE users SET meow_points = meow_points + ? WHERE telegram_id = ?`).bind(amount, fromUserId));
+    if (debits[1].meta.changes > 0) refunds.push(db.prepare(`UPDATE group_members SET meow_points = meow_points + ? WHERE telegram_group_id = ? AND telegram_user_id = ?`).bind(amount, groupId, fromUserId));
+    if (refunds.length) await db.batch(refunds);
+    return false;
+  }
+
+  try {
+    await db.batch([
+      db.prepare(`UPDATE users SET meow_points = meow_points + ? WHERE telegram_id = ?`).bind(amount, toUserId),
+      db.prepare(`UPDATE group_members SET meow_points = meow_points + ? WHERE telegram_group_id = ? AND telegram_user_id = ?`).bind(amount, groupId, toUserId),
+      db.prepare(`INSERT INTO transactions (telegram_user_id, group_id, amount, reason, created_at) VALUES (?, ?, ?, ?, ?)`)
+        .bind(fromUserId, groupId, -amount, `PAY_TO_${toUserId}`, now),
+      db.prepare(`INSERT INTO transactions (telegram_user_id, group_id, amount, reason, created_at) VALUES (?, ?, ?, ?, ?)`)
+        .bind(toUserId, groupId, amount, `PAY_FROM_${fromUserId}`, now),
+    ]);
+  } catch (err) {
+    // The credit batch is atomic on SQL errors; restore the first batch's
+    // debits before propagating the failure to the caller.
+    await db.batch([
+      db.prepare(`UPDATE users SET meow_points = meow_points + ? WHERE telegram_id = ?`).bind(amount, fromUserId),
+      db.prepare(`UPDATE group_members SET meow_points = meow_points + ? WHERE telegram_group_id = ? AND telegram_user_id = ?`).bind(amount, groupId, fromUserId),
+    ]);
+    throw err;
+  }
+
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Boosters — per-group temporary meow multipliers
+// ---------------------------------------------------------------------------
+
+export async function getBoosterStatus(
+  db: D1Database,
+  groupId: number,
+  userId: number
+): Promise<{ multiplier: number; until: number } | null> {
+  const row = await db
+    .prepare(
+      `SELECT active_booster_multiplier, active_booster_until
+       FROM group_members
+       WHERE telegram_group_id = ? AND telegram_user_id = ?`
+    )
+    .bind(groupId, userId)
+    .first<{ active_booster_multiplier: number; active_booster_until: number }>();
+  if (!row || row.active_booster_multiplier <= 0 || row.active_booster_until <= 0) return null;
+  const now = Math.floor(Date.now() / 1000);
+  if (row.active_booster_until <= now) return null;
+  return { multiplier: row.active_booster_multiplier, until: row.active_booster_until };
+}
+
+export async function buyBooster(
+  db: D1Database,
+  groupId: number,
+  userId: number,
+  multiplier: number,
+  durationSec: number,
+  cost: number
+): Promise<{ success: boolean; reason?: string }> {
+  const now = Math.floor(Date.now() / 1000);
+
+  // 4h purchase cooldown, enforced via the BOOSTER_* transaction rows (no
+  // schema change needed) so a user can't chain boosters back to back.
+  const last = await db
+    .prepare(`SELECT created_at FROM transactions WHERE telegram_user_id = ? AND group_id = ? AND reason LIKE 'BOOSTER_%' ORDER BY created_at DESC LIMIT 1`)
+    .bind(userId, groupId)
+    .first<{ created_at: number }>();
+  if (last && now - last.created_at < BOOSTER_COOLDOWN_SEC) {
+    return { success: false, reason: "cooldown" };
+  }
+
+  const until = now + durationSec;
+
+  // Check and debit from both balances (all-or-nothing)
+  const res = await db.batch([
+    db.prepare(`UPDATE users SET meow_points = meow_points - ? WHERE telegram_id = ? AND meow_points >= ?`).bind(cost, userId, cost),
+    db.prepare(`UPDATE group_members SET meow_points = meow_points - ? WHERE telegram_group_id = ? AND telegram_user_id = ? AND meow_points >= ?`).bind(cost, groupId, userId, cost),
+  ]);
+  if (res[0].meta.changes === 0 || res[1].meta.changes === 0) {
+    // Refund partial applies
+    const refunds: any[] = [];
+    if (res[0].meta.changes > 0) refunds.push(db.prepare(`UPDATE users SET meow_points = meow_points + ? WHERE telegram_id = ?`).bind(cost, userId));
+    if (res[1].meta.changes > 0) refunds.push(db.prepare(`UPDATE group_members SET meow_points = meow_points + ? WHERE telegram_group_id = ? AND telegram_user_id = ?`).bind(cost, groupId, userId));
+    if (refunds.length) await db.batch(refunds);
+    return { success: false, reason: "insufficient_funds" };
+  }
+
+  // Activate the booster and record the transaction in ONE batch so a crash
+  // can't leave an active booster with no audit trail (or vice versa).
+  await db.batch([
+    db.prepare(
+      `UPDATE group_members
+       SET active_booster_multiplier = ?, active_booster_until = ?
+       WHERE telegram_group_id = ? AND telegram_user_id = ?`
+    )
+      .bind(multiplier, until, groupId, userId),
     db.prepare(`INSERT INTO transactions (telegram_user_id, group_id, amount, reason, created_at) VALUES (?, ?, ?, ?, ?)`)
-      .bind(fromUserId, groupId, -amount, `PAY_TO_${toUserId}`, now),
-    db.prepare(`INSERT INTO transactions (telegram_user_id, group_id, amount, reason, created_at) VALUES (?, ?, ?, ?, ?)`)
-      .bind(toUserId, groupId, amount, `PAY_FROM_${fromUserId}`, now),
+      .bind(userId, groupId, -cost, `BOOSTER_${multiplier}x`, now),
   ]);
 
-  return results[0].meta.changes > 0 && results[2].meta.changes > 0;
+  return { success: true };
+}
+
+export async function getActiveBoosterMultiplier(db: D1Database, groupId: number, userId: number): Promise<number> {
+  const now = Math.floor(Date.now() / 1000);
+  const row = await db
+    .prepare(
+      `SELECT active_booster_multiplier FROM group_members
+       WHERE telegram_group_id = ? AND telegram_user_id = ?
+         AND active_booster_multiplier > 0 AND active_booster_until > ?`
+    )
+    .bind(groupId, userId, now)
+    .first<{ active_booster_multiplier: number }>();
+  return row?.active_booster_multiplier ?? 1;
+}
+
+// ---------------------------------------------------------------------------
+// Notifications — opt-out DM notifications
+// ---------------------------------------------------------------------------
+
+export async function getNotificationsEnabled(db: D1Database, userId: number): Promise<boolean> {
+  const row = await db
+    .prepare(`SELECT notifications_enabled FROM users WHERE telegram_id = ?`)
+    .bind(userId)
+    .first<{ notifications_enabled: number }>();
+  return row ? row.notifications_enabled === 1 : true;
+}
+
+export async function setNotificationsEnabled(db: D1Database, userId: number, enabled: boolean): Promise<void> {
+  await db
+    .prepare(`UPDATE users SET notifications_enabled = ? WHERE telegram_id = ?`)
+    .bind(enabled ? 1 : 0, userId)
+    .run();
+}
+
+export async function getLotteryWins(db: D1Database, userId: number): Promise<number> {
+  const row = await db
+    .prepare(
+      `SELECT COUNT(*) as c FROM transactions
+       WHERE telegram_user_id = ? AND reason = 'lottery_payout'`
+    )
+    .bind(userId)
+    .first<{ c: number }>();
+  return row?.c ?? 0;
+}
+
+export async function getGroupStats(db: D1Database, groupId: number) {
+  const members = await db
+    .prepare(`SELECT COUNT(*) as c FROM group_members WHERE telegram_group_id = ?`)
+    .bind(groupId)
+    .first<{ c: number }>();
+  const totalMeows = await db
+    .prepare(`SELECT SUM(total_meows) as s FROM group_members WHERE telegram_group_id = ?`)
+    .bind(groupId)
+    .first<{ s: number | null }>();
+  const settings = await getGroupSettings(db, groupId);
+  const topMeower = await db
+    .prepare(`SELECT username, first_name, meow_points FROM group_members WHERE telegram_group_id = ? ORDER BY meow_points DESC LIMIT 1`)
+    .bind(groupId)
+    .first<{ username: string | null; first_name: string | null; meow_points: number }>();
+  return {
+    memberCount: members?.c ?? 0,
+    totalMeows: totalMeows?.s ?? 0,
+    treasuryBalance: settings.treasuryBalance,
+    lotteryPot: settings.lotteryPot,
+    topMeower,
+  };
 }

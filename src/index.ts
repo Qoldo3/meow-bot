@@ -1,18 +1,23 @@
 import app from "./app";
-import { HokmGame } from "./hokmGame";
 import { Bindings } from "./types";
 import { runSweep } from "./sweep";
+import { runDeployNotify } from "./deployNotify";
+import { PokerGame } from "./pokerGame";
+import { BlackjackGame } from "./blackjackGame";
 
-export { HokmGame };
-
-// Cron trigger (every minute): reliable backstop for expiring duels and
-// Hokm lobbies whose in-request setTimeout() may never fire.
+// Cron trigger (every minute): reliable backstop for expiring duels whose
+// in-request setTimeout() may never fire, plus deploy notifications.
 const scheduled: ExportedHandlerScheduledHandler<Bindings> = async (
   _controller,
   env,
   ctx
 ) => {
-  ctx.waitUntil(runSweep(env.DB, env.TELEGRAM_BOT_TOKEN));
+  ctx.waitUntil(
+    (async () => {
+      await runSweep(env.DB, env.TELEGRAM_BOT_TOKEN);
+      await runDeployNotify(env.DB, env.TELEGRAM_BOT_TOKEN, env.BOT_OWNER_ID);
+    })()
+  );
 };
 
 /**
@@ -28,3 +33,7 @@ export default {
     app.fetch(request, env, ctx),
   scheduled,
 } satisfies ExportedHandler<Bindings>;
+
+// Durable Objects for in-group card games. Must be named exports of the main
+// module so the runtime can route their bindings to them.
+export { PokerGame, BlackjackGame };

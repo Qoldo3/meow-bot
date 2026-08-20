@@ -12,12 +12,10 @@ import {
   postMeowKeyboard,
   groupSettingsKeyboard,
   treasuryKeyboard,
-  clanKeyboard,
   lotteryKeyboard,
   duelKeyboard,
-  hokmSeatKeyboard,
-  hokmBoardKeyboard,
   eventInlineKeyboard,
+  boosterKeyboard,
 } from "./keyboards";
 import {
   ensureUser,
@@ -27,7 +25,6 @@ import {
   getGroupLotteryConfig,
   getUserStats,
   getGroupMemberBalance,
-  getGlobalRank,
   getGroupRank,
   getGroupDailyLeaderboard,
   findUserByUsername,
@@ -40,16 +37,18 @@ import {
   allocatePendingLotteryTickets,
   getLotteryParticipants,
   getRecentGroupTreasuryTransactions,
-  getGroupClanByName,
-  getUserClan,
-  createGroupClan,
-  joinClan,
-  leaveClan,
-  getClanMembers,
   getBotSetting,
   applyPayTransfer,
   getDuelRating,
   getDuelLeaderboard,
+  getActiveTitle,
+  getBoosterStatus,
+  buyBooster,
+  getActiveBoosterMultiplier,
+  getNotificationsEnabled,
+  setNotificationsEnabled,
+  getLotteryWins,
+  getGroupStats,
 } from "./database";
 import {
   createDuel,
@@ -67,23 +66,13 @@ import {
   generateDuelId,
   isValidDuelId,
   parseEventCommand,
+  toEnglishNumbers,
 } from "./utils";
-import {
-  createHokmGame,
-  getHokmGame,
-  getActiveHokmGame,
-  addHokmPlayer,
-  removeHokmPlayer,
-  refundHokmEscrow,
-  getHokmPlayers,
-  setHokmGameBoardMsg,
-  setHokmGamePlaying,
-  cancelHokmGame,
-  generateHokmId,
-  isValidHokmGameId,
-  hokmBotUserId,
-} from "./hokmLobby";
-import { handleAdmin, handleOwnerPanelAction, cancelActiveHokmGame } from "./owner";
+import { handleAdmin, handleOwnerPanelAction } from "./owner";
+import { handlePokerCallback, handlePokerCommand } from "./pokerHandlers";
+import { handleBlackjackCallback, handleBlackjackCommand } from "./blackjackHandlers";
+import { handleTitleCallback, titleBadge } from "./titleAuction";
+import { findBoosterTier, BOOSTER_COOLDOWN_SEC } from "./constants";
 import {
   Bindings,
   DuelState,
@@ -97,56 +86,333 @@ import {
 import {
   DUEL_TIMEOUT_SEC,
   DICE_COOLDOWN_SEC,
-  HOKM_LOBBY_TIMEOUT_SEC,
 } from "./constants";
 
 const MEOW_TIERS = [
   {
     id: 1,
-    key: "normal",
-    label: "گربه‌ی عادی",
-    message: (points: number) => `🐱 میو!\n+${points} امتیاز`,
+    key: "street",
+    label: "گربه‌ی خیابونی",
+    emoji: "🐈",
     defaultMinPoints: 1,
-    defaultMaxPoints: 300,
-    defaultChance: 0.60,
+    defaultMaxPoints: 200,
+    defaultChance: 0.33,
+    variants: [
+      `🐈 یه گربه‌ی ژولیده از پشت بوم پرید روی شونه‌ت و تو گوشت گفت: «میو!»\n+{points} امتیاز`,
+      `🐈 گربه‌ی خیابونی کفشت رو بو کرد، یه اخمی کرد و بعد با تأیید سر تکون داد. تأیید شد!\n+{points} امتیاز`,
+      `🐈 یه گربه‌ی خیس از بارون اومد چسبید به پات. بعدش یه جیبِ پر از شانس برات جا گذاشت!\n+{points} امتیاز`,
+      `🐈 گربه‌ی خیابونی یه تیکه ماهی از یه جایی آورد و جلوت گذاشت. پاداش شجاعت توئه!\n+{points} امتیاز`,
+      `🐈 گربه‌ی خیابونی نگات کرد، چرخید و دمش رو بلند کرد. توی زبان گربه‌ها یعنی: «تو اوکی هستی!»\n+{points} امتیاز`,
+      `🐈 از پشت یه ماشین، یه جفت چشم گربه‌ای بهت چشمک زد. یه چشمک = یه عالمه شانس!\n+{points} امتیاز`,
+      `🐈 گربه‌ی خیابونی نیمه‌شب‌ها از اینجا رد می‌شه. میگن هر کی بهش میو بگه، شانسی ازش رد می‌شه!\n+{points} امتیاز`,
+      `🐈 گربه‌ی خیابونی یه موشِ گنده رو نشون داد و گفت: «ببین چی گرفتم! تو هم بگیر!»\n+{points} امتیاز`,
+      `🐈 گربه‌ی خیابونی روی جعبه‌های خالی نشسته بود و با یه نگاه فیلسوفانه گفت: «میو یعنی زندگی.»\n+{points} امتیاز`,
+      `🐈 یه گربه‌ی کثیف ولی بانمک اومد و مالید به پات. هرکی گربه بهش بماله، پولش زیاد می‌شه! باور کن!\n+{points} امتیاز`,
+      `🐈 گربه‌ی خیابونی امروز صبح توی حیاطت چرت می‌زد. چرت گربه‌ای = انرژی مثبت برای کل روز!\n+{points} امتیاز`,
+    ],
+    nightVariants: [
+      `🌙 گربه‌ی شبگرد از روی دیوار رد شد و تاریکی رو با چشم‌هاش روشن کرد. بهت شانس شب داد!\n+{points} امتیاز`,
+      `🌙 نیمه‌شبه. یه گربه از توی سایه اومد بیرون، یه چیزی زیر گوشت گفت و دوباره رفت. خوب بود!\n+{points} امتیاز`,
+      `🌙 گربه‌ی خیابونی زیر نور ماه نشسته بود و برای ستاره‌ها میو می‌گفت. یکی از اون میوها مال تو بود!\n+{points} امتیاز`,
+      `🌙 تو تاریکی فقط چشم‌های یه گربه دیده می‌شد. بهت خیره شد… و بعدش یه عالمه شانس ریخت تو جیبت!\n+{points} امتیاز`,
+    ],
   },
   {
     id: 2,
-    key: "rare",
-    label: "گربه‌ی رنگین‌کمان",
-    message: (points: number) => `🌈 گربه‌ی رنگین‌کمان پیدا شد!\n\n+${points} امتیاز`,
-    defaultMinPoints: 301,
-    defaultMaxPoints: 700,
-    defaultChance: 0.355,
+    key: "lucky",
+    label: "گربه‌ی لوسی",
+    emoji: "😼",
+    defaultMinPoints: 201,
+    defaultMaxPoints: 500,
+    defaultChance: 0.55,
+    variants: [
+      `😼 گربه‌ی لوسی با یه چشم بسته و یه چشم باز نگات کرد. اون موقعه که می‌فهمی شانس توی گوشه‌ست!\n+{points} امتیاز`,
+      `😼 گربه‌ی لوسی همیشه روی چهار تا پاش فرود میاد. امروز هم روی حساب بانکیت فرود اومد!\n+{points} امتیاز`,
+      `😼 گربه‌ی لوسی یه سکه‌ی بخت‌آور از پشت گوشش درآورد و انداخت توی جیبت. مال خودت!\n+{points} امتیاز`,
+      `😼 گربه‌ی لوسی هفت بار دورت چرخید و بعد آروم شد. عدد شانس تو همینه!\n+{points} امتیاز`,
+      `😼 گربه‌ی لوسی خرخرش رو راه انداخت. صدای خرخر گربه = بهترین ریمیکس دنیا + شانس!\n+{points} امتیاز`,
+      `😼 گربه‌ی لوسی یه پلک زد و یه‌و یه تیکه از شانسش ریخت بیرون. تو بودی که گرفتیش!\n+{points} امتیاز`,
+      `😼 گربه‌ی لوسی همیشه یه قدم جلوتر از بدشانسیه. امروز تو رو هم با خودش برد!\n+{points} امتیاز`,
+      `😼 گربه‌ی لوسی کفش راستت رو لیس زد. طبق افسانه‌ی گربه‌ها، یعنی روزت مثبته!\n+{points} امتیاز`,
+      `😼 گربه‌ی لوسی توی آینه به خودش نگاه کرد و گفت: «کی از من خوش‌شانس‌تره؟» جواب دادیم: تو!\n+{points} امتیاز`,
+      `😼 گربه‌ی لوسی یه موشِ خوش‌شانس هم داره. ولی امروز شانس رو به تو داد!\n+{points} امتیاز`,
+      `😼 گربه‌ی لوسی سه بار چرخید و بعد روی یه پا نشست. اون لحظه یعنی یه خبر خوب در راهه!\n+{points} امتیاز`,
+    ],
   },
   {
     id: 3,
-    key: "epic",
-    label: "گربه‌ی افسانه‌ای",
-    message: (points: number) => `✨ گربه‌ی افسانه‌ای تو را دید!\n\n+${points} امتیاز`,
-    defaultMinPoints: 701,
-    defaultMaxPoints: 1300,
-    defaultChance: 0.03,
+    key: "rainbow",
+    label: "گربه‌ی رنگین‌کمانی",
+    emoji: "🌈",
+    defaultMinPoints: 501,
+    defaultMaxPoints: 900,
+    defaultChance: 0.085,
+    variants: [
+      `🌈 یه گربه‌ی رنگین‌کمانی از توی بارون پرید بیرون و یه کم از رنگ‌هاش رو روی تو پاشید!\n+{points} امتیاز`,
+      `🌈 گربه‌ی رنگین‌کمانی از اون سر رنگین‌کمون اومد. میگن آخرش یه گلدون شانس منتظره!\n+{points} امتیاز`,
+      `🌈 یه گربه‌ی راه‌راه رنگی دورت چرخید و با دمش یه رنگین‌کمون کوچیک کشید!\n+{points} امتیاز`,
+      `🌈 گربه‌ی رنگین‌کمانی یه جعبه‌ی رنگ همیشه با خودش داره. امروز یه عالمه رنگ داد به روزت!\n+{points} امتیاز`,
+      `🌈 گربه‌ی رنگین‌کمانی از توی یه ابر رنگی اومد پایین و یه پاکت شانس بهت داد!\n+{points} امتیاز`,
+      `🌈 گربه‌ی رنگین‌کمانی گفت: «خاکستری برای گربه‌های معمولیه. تو رنگی شدی!»\n+{points} امتیاز`,
+      `🌈 یه بارون اومد و گربه‌ی رنگین‌کمانی از توش بیرون پرید. هر کی پیداش کنه، روزش رنگ می‌گیره!\n+{points} امتیاز`,
+      `🌈 گربه‌ی رنگین‌کمانی هفت تا رنگ رو هفت بار دورت چرخوند. همهشون گفتن: خوش‌شانسی!\n+{points} امتیاز`,
+      `🌈 یه رد پای رنگارنگ از جلوت رد شد و یه‌و محو شد. ردپای گربه‌ی رنگین‌کمانی!\n+{points} امتیاز`,
+    ],
   },
   {
     id: 4,
-    key: "legendary",
-    label: "گربه‌ی پادشاه",
-    message: (points: number) => `👑 گربه‌ی پادشاه به تو برکت داد!\n\n+${points} امتیاز`,
-    defaultMinPoints: 1301,
-    defaultMaxPoints: 1600,
-    defaultChance: 0.01,
+    key: "legend",
+    label: "گربه‌ی افسانه‌ای",
+    emoji: "✨",
+    defaultMinPoints: 901,
+    defaultMaxPoints: 1300,
+    defaultChance: 0.025,
+    variants: [
+      `✨ گربه‌ی افسانه‌ای از دل یه قصه‌ی قدیمی اومد بیرون و گفت: «امروز تو شخصیت اصلی شدی.»\n+{points} امتیاز`,
+      `✨ گربه‌ی افسانه‌ای یه معما ازت پرسید و قبل از جواب دادنت خندید: «آفرین! درست گفتی!»\n+{points} امتیاز`,
+      `✨ گربه‌ی افسانه‌ای هزار ساله و هنوز جوونه. میگه رازش میو کردنه. حالا مال توئه!\n+{points} امتیاز`,
+      `✨ گربه‌ی افسانه‌ای با پنجه‌ش یه دایره‌ی جادویی دورت کشید. هیچ بدشانسی حق ورود نداره!\n+{points} امتیاز`,
+      `✨ گربه‌ی افسانه‌ای از توی یه کتاب قدیمی اومد بیرون. میگن هرکی باهاش میو بگه، توی قصه‌ها می‌مونه!\n+{points} امتیاز`,
+      `✨ گربه‌ی افسانه‌ای نگات کرد و گفت: «من هزار تا راز می‌دونم. یکی رو امروز به تو میگم.»\n+{points} امتیاز`,
+      `✨ یه نور سبز شد و گربه‌ی افسانه‌ای جلوت ظاهر شد. این گربه فقط برای آدم‌های خاص میاد!\n+{points} امتیاز`,
+      `✨ گربه‌ی افسانه‌ای یه پنجه‌ش رو بالا آورد و یه ستاره‌ی کوچیک ازش افتاد تو دستت!\n+{points} امتیاز`,
+      `✨ گربه‌ی افسانه‌ای با یه پلک زدن از یه قصه اومد توی قصه‌ی تو. حالا هر دو تون توی یه صفحه‌اید!\n+{points} امتیاز`,
+    ],
   },
   {
     id: 5,
-    key: "royal",
+    key: "king",
+    label: "گربه‌ی پادشاه",
+    emoji: "👑",
+    defaultMinPoints: 1301,
+    defaultMaxPoints: 1700,
+    defaultChance: 0.007,
+    variants: [
+      `👑 گربه‌ی پادشاه تاجش رو کج کرد و گفت: «امروز تو رو انتخاب کردم، بنده‌ی من.»\n+{points} امتیاز`,
+      `👑 گربه‌ی پادشاه با یه خرخرِ سلطنتی اعلام کرد: «از این به بعد، تو جزو درباریان منی!»\n+{points} امتیاز`,
+      `👑 گربه‌ی پادشاه عصاش رو نشون داد و یه برکت سلطنتی بهت داد. تعظیم کن!\n+{points} امتیاز`,
+      `👑 گربه‌ی پادشاه شنید امروز میو گفتی و گفت: «بسیار خب، جایزه‌ی وفاداری!»\n+{points} امتیاز`,
+      `👑 گربه‌ی پادشاه فقط یک بار در روز ظاهر می‌شه. و اون یک بار، الان بود!\n+{points} امتیاز`,
+      `👑 گربه‌ی پادشاه خزید روی تختش (یه مبل کهنه) و گفت: «این برکت رو از دست نده!»\n+{points} امتیاز`,
+      `👑 گربه‌ی پادشاه نگات کرد و سبیل‌هاش رو صاف کرد: «من تو رو می‌پسندم.»\n+{points} امتیاز`,
+      `👑 گربه‌ی پادشاه به درباریانش اشاره کرد که یه صندوق پر از شانس بیارن. صندوق رو گذاشتن جلوی تو!\n+{points} امتیاز`,
+    ],
+  },
+  {
+    id: 6,
+    key: "diamond",
     label: "گربه‌ی الماسی",
-    message: (points: number) => `💎 گربه‌ی الماسی درخشید!\n\n+${points} امتیاز`,
-    defaultMinPoints: 1601,
-    defaultMaxPoints: 2000,
-    defaultChance: 0.005,
+    emoji: "💎",
+    defaultMinPoints: 1701,
+    defaultMaxPoints: 2200,
+    defaultChance: 0.0025,
+    variants: [
+      `💎 گربه‌ی الماسی از توی نور خورشید اومد بیرون و یه الماس واقعی از دمش افتاد!\n+{points} امتیاز`,
+      `💎 گربه‌ی الماسی اگه بخنده، اشکش الماس می‌شه. امروز جلوی تو خندید!\n+{points} امتیاز`,
+      `💎 گربه‌ی الماسی دورت چرخید و هرجا رد شد، زمین برق زد. آخرش یه تیکه‌ش رو به تو داد!\n+{points} امتیاز`,
+      `💎 گربه‌ی الماسی توی تاریکی می‌درخشه. امشب کنار تو درخشید!\n+{points} امتیاز`,
+      `💎 گربه‌ی الماسی گفت: «الماس‌ها از فشار درست می‌شن. تو هم مثل الماس شدی!»\n+{points} امتیاز`,
+      `💎 گربه‌ی الماسی یه پنجه‌ش رو دراز کرد و یه جواهر کوچیک گذاشت توی دستت!\n+{points} امتیاز`,
+      `💎 یه برق الماسی توی هوا چرخید و یه گربه‌ی درخشان جلوت ایستاد. الماس‌ها تعظیم کردن!\n+{points} امتیاز`,
+    ],
+  },
+  {
+    id: 7,
+    key: "galaxy",
+    label: "گربه‌ی کهکشانی",
+    emoji: "🌌",
+    defaultMinPoints: 2201,
+    defaultMaxPoints: 3000,
+    defaultChance: 0.0005,
+    variants: [
+      `🌌 یه فلاش نور! گربه‌ی کهکشانی از دل ستاره‌ها اومد و یه ستاره از پنجه‌ش افتاد!\n+{points} امتیاز`,
+      `🌌 گربه‌ی کهکشانی با کهکشون تماس گرفت و گفت: «مقررات اجازه می‌ده یک بار بهت جایزه بدم.»\n+{points} امتیاز`,
+      `🌌 گربه‌ی کهکشانی از یه سیاره‌ی دیگه اومده تا میو بگه. این اولین میوی فضایی توی گروهته!\n+{points} امتیاز`,
+      `🌌 گربه‌ی کهکشانی وقتی میو می‌کنه، ستاره‌ها چشمک می‌زنن. الان داشتن چشمک می‌زدن!\n+{points} امتیاز`,
+      `🌌 گربه‌ی کهکشانی یه تیکه از دنباله‌دارش رو بهت داد و گفت: «یه آرزو کن.»\n+{points} امتیاز`,
+      `🌌 گربه‌ی کهکشانی توی جیبش یه سیاره‌ی کوچیک داره. امروز اون سیاره رو به اسم تو کرد!\n+{points} امتیاز`,
+      `🌌 گربه‌ی کهکشانی از توی یه سیاه‌چاله اومد بیرون و گفت: «اون طرف همه‌شون میو می‌گن.»\n+{points} امتیاز`,
+      `🌌 گربه‌ی کهکشانی نگاهت کرد، ستاره‌ها توی چشماش چرخیدن و گفت: «تو خاصی.»\n+{points} امتیاز`,
+    ],
+  },
+  {
+    id: 8,
+    key: "supernova",
+    label: "گربه‌ی ابرنواختری",
+    emoji: "💥",
+    defaultMinPoints: 3001,
+    defaultMaxPoints: 4000,
+    defaultChance: 0.0003,
+    variants: [
+      `💥 انفجار! یه ابرنواختر منفجر شد و از دلش یه گربه‌ی درخشان بیرون اومد که داشت میو می‌گفت!\n+{points} امتیاز`,
+      `💥 گربه‌ی ابرنواختری از توی یه ستاره‌ی در حال انفجار بیرون پرید و گفت: «من از آتیش اومدم، بیا شانست رو بگیر!»\n+{points} امتیاز`,
+      `💥 آسمون یه‌و روشن شد! یه ابرنواختر داشت می‌درخشید و وسطش یه گربه بود که با دمش شکل قلب می‌کشید!\n+{points} امتیاز`,
+      `💥 گربه‌ی ابرنواختری یه تیکه از انرژی هسته‌ایش رو بهت داد و گفت: «این بیشتر از اون چیزیه که فکر می‌کنی!»\n+{points} امتیاز`,
+      `💥 یه نور خیره‌کنننده! وقتی چشماتو باز کردی، یه گربهی ابرنواختری جلوت بود و می‌گفت: «من آخرین نوری‌ام که می‌بینی!»\n+{points} امتیاز`,
+      `💥 گربه‌ی ابرنواختری از توی یه کلونی ستاره‌ای اومد و با یه پنجه‌ش یه سحابی کوچیک بهت هدیه داد!\n+{points} امتیاز`,
+      `💥 یه انفجار کیهانی رخ داد و از دلش یه گربه بیرون اومد که داشت روی ابرهای گازی راه می‌رفت. بهت اشاره کرد: «بیا بالا!»\n+{points} امتیاز`,
+      `💥 گربه‌ی ابرنواختری گفت: «من از بقیه‌ی گربه‌ها قوی‌ترم. چون از دل یه ستاره‌ی منفجر شده اومدم!»\n+{points} امتیاز`,
+    ],
+    nightVariants: [
+      `🌙💥 نیمه‌شب آسمون یه‌و سفید شد! یه ابرنواختر داشت منفجر می‌شد و وسطش یه گربه بود که داشت میو می‌گفت.\n+{points} امتیاز`,
+      `🌙💥 توی تاریکی شب، ناگهان یه نور خیره‌کننده اومد و یه گربه‌ی ابرنواختری جلوت ظاهر شد. گفت: «من نور تاریکی‌ام!»\n+{points} امتیاز`,
+    ],
+  },
+  {
+    id: 9,
+    key: "phoenix",
+    label: "گربه‌ی ققنوسی",
+    emoji: "🔥",
+    defaultMinPoints: 4001,
+    defaultMaxPoints: 5500,
+    defaultChance: 0.0002,
+    variants: [
+      `🔥 آتیش! یه ققنوس از توی شعله‌ها بیرون اومد و روی شونه‌ت نشست. گفت: «از خاکستر، شانس تو متولد شد!»\n+{points} امتیاز`,
+      `🔥 گربه‌ی ققنوسی از توی یه آتیش بزرگ بیرون پرید و دمش مثل یه مشعل می‌سوخت. گفت: «من نمی‌سوزم، تو هم نمی‌سوزی!»\n+{points} امتیاز`,
+      `🔥 یه شعله‌ی طلایی از آسمون اومد پایین و وسطش یه ققنوس گربه‌ای بود که داشت می‌خوند: «از خاکستر برمی‌خیزم!»\n+{points} امتیاز`,
+      `🔥 گربه‌ی ققنوسی یه پر از دمش کند و انداخت جلوت. پر شروع به سوختن کرد ولی گرماش فقط بهت انرژی داد!\n+{points} امتیاز`,
+      `🔥 ققنوس گربه‌ای دورت چرخید و هرجا رد شد، آتیشش به گل تبدیل شد. آخرش یه دسته گل آتیشی بهت داد!\n+{points} امتیاز`,
+      `🔥 گربه‌ی ققنوسی گفت: «من هزار بار مردم و هزار بار زنده شدم. تو هم هر روز یه بار زنده می‌شی — با میو!»\n+{points} امتیاز`,
+      `🔥 یه بال ققنوس از آسمون افتاد جلوت و شروع به سوختن کرد. وقتی خاموش شد، یه تیکه شانس وسطش بود!\n+{points} امتیاز`,
+      `🔥 گربه‌ی ققنوسی توی آتیش راه می‌رفت و هر قدمش یه ستاره روشن می‌کرد. یکی از اون ستاره‌ها مال تو بود!\n+{points} امتیاز`,
+    ],
+    nightVariants: [
+      `🌙🔥 توی تاریکی شب، یه نور آتیشی اومد و یه ققنوس گربه‌ای از شعله‌ها بیرون اومد. گفت: «من نور شبم!»\n+{points} امتیاز`,
+      `🌙🔥 نیمه‌شب آسمون سرخ شد و یه ققنوس گربه‌ای از دل آتیش بیرون اومد. گفت: «بیدار شو، شانت اومده!»\n+{points} امتیاز`,
+    ],
+  },
+  {
+    id: 10,
+    key: "dragon",
+    label: "گربه‌ی اژدهایی",
+    emoji: "🐉",
+    defaultMinPoints: 5501,
+    defaultMaxPoints: 7500,
+    defaultChance: 0.00015,
+    variants: [
+      `🐉 زمین لرزید! یه اژدها-گربه از توی کوه آتشفشانی بیرون اومد و با یه فوت آتیش، یه صندوقچه‌ی پر از شانس جلوت گذاشت!\n+{points} امتیاز`,
+      `🐉 گربه‌ی اژدهایی دمش مثل یه اژدها بود و چشماش می‌درخشید. گفت: «من گربه‌ام ولی رگ اژدها دارم! شانت رو بگیر!»\n+{points} امتیاز`,
+      `🐉 یه غرش بلند اومد و یه گربه‌ی اژدهایی با بال‌های بزرگ از توی ابرها بیرون اومد. روی سرت نشست و یه هدیه گذاشت!\n+{points} امتیاز`,
+      `🐉 گربه‌ی اژدهایی یه تیکه از فلس‌های طلاییش رو بهت داد و گفت: «این فلس‌ها از طلای خالصه. مال تو!»\n+{points} امتیاز`,
+      `🐉 اژدها-گربه دورت چرخید و دمش مثل یه شلاق آتیشی بود. هرجا رد شد، زمین سبز شد!\n+{points} امتیاز`,
+      `🐉 گربه‌ی اژدهایی گفت: «من از قله‌ی کوه آمدم تا بهت بگم: تو قوی‌ترینی!»\n+{points} امتیاز`,
+      `🐉 یه اژدها-گربه با یه فوت آتیشی، یه قلعه‌ی یخی رو ذوب کرد و وسطش یه گنج پنهان بود — مال تو!\n+{points} امتیاز`,
+      `🐉 گربه‌ی اژدهایی بال‌هاش رو باز کرد و آسمون رو پر از فلس‌های درخشان کرد. یکی از اون فلس‌ها روی دستت افتاد!\n+{points} امتیاز`,
+    ],
+    nightVariants: [
+      `🌙🐉 توی تاریکی شب، یه نور سبز اومد و یه اژدها-گربه با چشمای درخشان جلوت ظاهر شد. گفت: «من محافظ شبم!»\n+{points} امتیاز`,
+      `🌙🐉 نیمه‌شب آتشفشان فوران کرد و از دلش یه گربه‌ی اژدهایی بیرون اومد که داشت میو می‌گفت!\n+{points} امتیاز`,
+    ],
+  },
+  {
+    id: 11,
+    key: "shadow",
+    label: "گربه‌ی سایه",
+    emoji: "🌑",
+    defaultMinPoints: 7501,
+    defaultMaxPoints: 10000,
+    defaultChance: 0.0001,
+    variants: [
+      `🌑 سایه‌ت یه‌و حرکت کرد! وقتی برگشتی، یه گربه‌ی سایه از توی سایه‌ت بیرون اومد و یه چیزی زیر گوشت گفت…\n+{points} امتیاز`,
+      `🌑 گربه‌ی سایه مثل دود محو شد و بعد از پشتت ظاهر شد. یه دستمال پر از شانس توی جیبت گذاشت و دوباره محو شد!\n+{points} امتیاز`,
+      `🌑 توی یه لحظه تاریکی، یه گربه‌ی سایه از توی هیچی ظاهر شد. چشماش فقط دوتا نور قرمز بود. یه چیزی بهت داد و گفت: «هیشکی نباید بدونه.»\n+{points} امتیاز`,
+      `🌑 گربه‌ی سایه از توی آینه بیرون اومد و گفت: «من برعکس توام. من شب رو روشن می‌کنم!»\n+{points} امتیاز`,
+      `🌑 سایه‌ی دیوارت یه‌و شکل گربه گرفت و بعد واقعاً یه گربه شد! یه چیزی انداخت جلوت و دوباره سایه شد.\n+{points} امتیاز`,
+      `🌑 گربه‌ی سایه گفت: «من همیشه اینجام. حتی وقتی نمی‌بینیم. امروز می‌خوام خودمو نشون بدم.»\n+{points} امتیاز`,
+      `🌑 یه باد سرد اومد و وسطش یه گربه‌ی سایه بود که داشت روی آسمون راه می‌رفت. بهت اشاره کرد: «بیا بالا!»\n+{points} امتیاز`,
+      `🌑 گربه‌ی سایه از توی تاریکی اومد و یه چشمک زد. یه‌و همه‌چیز روشن شد و یه صندوقچه‌ی طلایی جلوت بود!\n+{points} امتیاز`,
+    ],
+    nightVariants: [
+      `🌙🌑 توی تاریکی محض، یه گربه‌ی سایه از توی سایه‌ت بیرون اومد و گفت: «ما همیشه باهاتیم.»\n+{points} امتیاز`,
+      `🌙🌑 نیمه‌شب به آسمون نگاه کردی و دیدی یه گربه‌ی سایه داره روی ماه راه می‌ره. یه چیزی از ماه انداخت پایین — مال تو!\n+{points} امتیاز`,
+    ],
+  },
+  {
+    id: 12,
+    key: "cosmic_god",
+    label: "خدای کیهانی",
+    emoji: "⚡",
+    defaultMinPoints: 10001,
+    defaultMaxPoints: 15000,
+    defaultChance: 0.00005,
+    variants: [
+      `⚡ آسمون شکافت! یه خدای گربه‌ای از پشت آسمون بیرون اومد و با یه حرکت دست، کل کیهان رو بهت هدیه داد!\n+{points} امتیاز`,
+      `⚡ یه صدای عظیم اومد: «میو!» — خدای گربه‌ها از توی ابرها بیرون اومد و یه تاج ستاره‌ای روی سرت گذاشت!\n+{points} امتیاز`,
+      `⚡ خدای کیهانی گربه با یه پنجه‌ش زمین رو لمس کرد و هرجا رد شد، گل و گیاه رویید. یه دسته گل ستاره‌ای بهت داد!\n+{points} امتیاز`,
+      `⚡ خدای گربه‌ها گفت: «من خالق تمام گربه‌هام. و تو رو هم خالق شانس کردم!»\n+{points} امتیاز`,
+      `⚡ یه نور طلایی از آسمون اومد و خدای گربه‌ای از توی نور بیرون اومد. یه حلقه‌ی ستاره‌ای دورت کشید و گفت: «تو مقدسی!»\n+{points} امتیاز`,
+      `⚡ خدای کیهانی یه پنجه‌ش رو بالا آورد و تمام ستاره‌ها شروع به رقصیدن کردن. یکی از اون ستاره‌ها رو برداشت و گذاشت توی دستت!\n+{points} امتیاز`,
+      `⚡ زمین لرزید، آسمون سرخ شد و خدای گربه‌ها از توی هیچی ظاهر شد. گفت: «امروز تو خوش‌شانس‌ترینی!»\n+{points} امتیاز`,
+      `⚡ خدای کیهانی با یه نگاه، تمام ابرها رو کنار زد و یه تونل طلایی به سمت آسمون باز کرد. گفت: «بیا بالا، شانت اینجاست!»\n+{points} امتیاز`,
+    ],
+    nightVariants: [
+      `🌙⚡ نیمه‌شب آسمون شکافت و خدای گربه‌ها از پشت ماه بیرون اومد. گفت: «من ماه رو هم برای تو روشن کردم!»\n+{points} امتیاز`,
+      `🌙⚡ توی تاریکی شب، یه نور طلایی از آسمون اومد و خدای گربه‌ها جلوت ظاهر شد. یه ستاره از تاجش برداشت و گذاشت توی دستت!\n+{points} امتیاز`,
+    ],
   },
 ];
+
+const MEOW_COOLDOWN_LINES = [
+  `😴 گربه بعد از اون همه خرخره چرت می‌زنه. {duration} دیگه بیدار می‌شه!`,
+  `🐱 گربه یه چُرت کوتاه گرفته. {duration} دیگه برمی‌گرده با یه میوی تازه!`,
+  `😾 گربه گفت: «بسه دیگه!» و رفت روی پشتبوم چرت بزنه. {duration} دیگه بیا!`,
+  `🐈 گربه داره روی پنجه‌هاش حساب می‌کنه کی دوباره بیاد. جواب: {duration} دیگه!`,
+  `😸 گربه خرخرش رو تنظیم کرد و خوابید. {duration} دیگه بیدارش کن!`,
+  `😿 گربه از اون همه میو صدام درومده… {duration} دیگه برمی‌گرده!`,
+];
+
+const MEOW_MILESTONE_LINES = [
+  `🎂 دهمین میوی تو! گربه‌ها دارن باور نمی‌کنن!`,
+  `🎉 میو شماره‌ی ۱۰! گربه‌ی خیابونی یه رقص کوچیک کرد!`,
+  `🏆 ده میو پشت سر هم! گربه‌ی پادشاه سرش رو تکون داد: «تحسین‌برانگیزه!»`,
+  `🎊 دهمین میو! یه گربه از پشتبوم با یه بادکنک اومد پایین جشن بگیره!`,
+  `🎈 ده میو کامل! گربه‌ی لوسی یه سکه‌ی خوش‌شانسی بهت هدیه داد!`,
+];
+
+const FIRST_MEOW_LINES = [
+  `🎉 اولین میوی زندگیته! گربه‌ها یه جشن کوچیک گرفتن!`,
+  `🐱 اولین میو! از امروز تو جزو خانواده‌ی گربه‌ها شدی!`,
+  `🎈 اولین میو! یه گربه با یه کادو اومد. کادو = شانس!`,
+];
+
+const CAT_FACTS = [
+  `🐱 واقعیت: گربه‌ها می‌تونن ۶ برابر اندازه‌شون بپرن!`,
+  `🐱 واقعیت: گربه‌ها روزی حدود ۱۶ ساعت می‌خوابن. شاید به همین دلیل اینقدر خوشحالن!`,
+  `🐱 واقعیت: صدای خرخر گربه می‌تونه استرس رو کم کنه. علمی ثابت شده!`,
+  `🐱 واقعیت: گربه‌ها با دمشون حرف می‌زنن. دم بالا = خوشحال!`,
+  `🐱 واقعیت: گربه‌ها ۳۲ عضله توی هر گوش دارن!`,
+  `🐱 واقعیت: میو فقط برای انسان‌هاست؛ گربه‌ها با همدیگه میو نمی‌گن!`,
+  `🐱 واقعیت: قلب گربه دو برابر سریع‌تر از قلب تو می‌زنه!`,
+  `🐱 واقعیت: گربه‌ها می‌تونن تشخیص بدن حالت چهره‌ی تو چیه!`,
+  `🐱 واقعیت: اولین گربه‌ی فضایی — «فلیکت» — با موفقیت از فضا برگشت!`,
+  `🐱 واقعیت: گربه‌ها عاشق جعبه‌های خالین. جعبه = امنیت!`,
+  `🐱 واقعیت: سبیل گربه به اندازه‌ی عرض بدنشه. با اون راهش رو پیدا می‌کنه!`,
+  `🐱 واقعیت: گربه‌ها توی خوابم رؤیا می‌بینن. بعضی‌هاشون حرف هم می‌زنن!`,
+];
+
+export function tierMessage(tier: MeowTierConfig, points: number, hour?: number): string {
+  let pool = tier.variants;
+  if (tier.nightVariants?.length && hour != null && (hour >= 22 || hour < 6)) {
+    pool = tier.nightVariants;
+  }
+  const tpl = pool[Math.floor(Math.random() * pool.length)];
+  if (!tpl) return `🐱 میو!\n+${points} امتیاز`;
+  return tpl.replace("{points}", String(points));
+}
+
+export function randomCooldownLine(): string {
+  return MEOW_COOLDOWN_LINES[Math.floor(Math.random() * MEOW_COOLDOWN_LINES.length)];
+}
+
+export function meowMilestoneLine(firstMeow: boolean, everyTenth: boolean): string | null {
+  if (firstMeow) return FIRST_MEOW_LINES[Math.floor(Math.random() * FIRST_MEOW_LINES.length)];
+  if (everyTenth) return MEOW_MILESTONE_LINES[Math.floor(Math.random() * MEOW_MILESTONE_LINES.length)];
+  return null;
+}
+
+export function randomCatFact(): string {
+  return CAT_FACTS[Math.floor(Math.random() * CAT_FACTS.length)];
+}
 
 const BADGES = [
   { min: 800, title: "گربه‌ی پادشاه" },
@@ -168,14 +434,16 @@ function getMeowTaxRateByRank(rank: number): number {
 }
 
 type AwardMeowResult =
-  | { points: number; basePoints: number; eventBonus: number; tier: MeowTierConfig; taxAmount: number; taxRate: number; cooldown: false }
+  | { points: number; basePoints: number; eventBonus: number; tier: MeowTierConfig; taxAmount: number; taxRate: number; lotteryTicketEarned: boolean; milestone: boolean; firstMeow: boolean; cooldown: false; boosterMult: number }
   | { cooldown: number };
 
-type MeowTierConfig = {
+export type MeowTierConfig = {
   id: number;
   key: string;
   label: string;
-  message: (points: number) => string;
+  emoji?: string;
+  variants: string[];
+  nightVariants?: string[];
   minPoints: number;
   maxPoints: number;
   chance: number;
@@ -244,25 +512,42 @@ async function invalidateActiveEventCache(env: Bindings) {
   await env.CACHE.delete(ACTIVE_EVENT_CACHE_KEY);
 }
 
-function adjustMeowTierChancesForSpecialUser(
+// VIP tier odds: the bottom tier is nearly eliminated, every tier above it gets
+// a multiplier that increases with tier rarity, then the chances are renormalized
+// to sum to 1. Higher tiers get progressively bigger boosts so the VIP user has
+// meaningful chances at the ultra-rare tiers.
+const VIP_TIER_WEIGHTS = [
+  0.15,  // tier 0 (street) — nearly eliminated
+  0.735, // tier 1 (lucky) — ~34.8%
+  3.68,  // tier 2 (rainbow) — ~44.7%
+  1.5,   // tier 3 (legend)
+  1.8,   // tier 4 (king)
+  2.0,   // tier 5 (diamond)
+  2.5,   // tier 6 (galaxy)
+  3.0,   // tier 7 (supernova)
+  4.0,   // tier 8 (phoenix)
+  5.0,   // tier 9 (dragon)
+  6.0,   // tier 10 (shadow)
+  7.0,   // tier 11 (cosmic god)
+];
+
+export function adjustMeowTierChancesForSpecialUser(
   tiers: MeowTierConfig[],
   userId: number,
   specialUserId?: string | null
 ): MeowTierConfig[] {
   if (!specialUserId || String(userId) !== String(specialUserId)) return tiers;
 
-  const boost = 0.20;
   const adjusted = tiers.map((tier) => ({ ...tier }));
-  const lowTier = adjusted[0];
-  let totalBoost = 0;
-
-  for (let i = 1; i < adjusted.length; i += 1) {
-    const bonus = Math.min(boost, 1 - adjusted[i].chance);
-    adjusted[i].chance += bonus;
-    totalBoost += bonus;
-  }
-
-  lowTier.chance = Math.max(0, lowTier.chance - totalBoost);
+  const weighted = adjusted.map((tier, i) => {
+    const weight = i < VIP_TIER_WEIGHTS.length ? VIP_TIER_WEIGHTS[i] : 3.5;
+    return tier.chance * weight;
+  });
+  const sum = weighted.reduce((a, b) => a + b, 0);
+  if (sum <= 0) return adjusted;
+  adjusted.forEach((tier, i) => {
+    tier.chance = weighted[i] / sum;
+  });
   return adjusted;
 }
 
@@ -342,6 +627,14 @@ function formatLotteryStatusText(settings: {
 
 export async function getLotteryStatusText(db: D1Database, groupId: number, userId: number) {
   const settings = await getGroupLotteryConfig(db, groupId);
+
+  // Capture pending free tickets BEFORE allocation (allocation zeroes the counter).
+  const pendingBefore = await db
+    .prepare(`SELECT lottery_bonus_tickets FROM group_members WHERE telegram_group_id = ? AND telegram_user_id = ?`)
+    .bind(groupId, userId)
+    .first<{ lottery_bonus_tickets: number }>();
+  const pendingBeforeCount = pendingBefore?.lottery_bonus_tickets ?? 0;
+
   await allocatePendingLotteryTickets(db, groupId);
 
   const round = await db
@@ -350,7 +643,10 @@ export async function getLotteryStatusText(db: D1Database, groupId: number, user
     .first<{ id: number; round_number: number; ticket_price: number }>();
 
   if (!round) {
-    return `🎫 <b>هیچ دور بازی فعالی وجود ندارد.</b>\n\nوقتی دور جدید شروع شود، می‌توانی بلیت بخری و شماره‌های خود را ببینی.`;
+    const waitingText = pendingBeforeCount > 0
+      ? `\n\n🎁 بلیت‌های رایگان در انتظار شما: <b>${pendingBeforeCount}</b> — به محض شروع دور جدید، خودکار ثبت می‌شوند.`
+      : "";
+    return `🎫 <b>هیچ دور بازی فعالی وجود ندارد.</b>\n\nوقتی دور جدید شروع شود، می‌توانی بلیت بخری و شماره‌های خود را ببینی.${waitingText}`;
   }
 
   const participants = await getLotteryParticipants(db, groupId);
@@ -361,13 +657,8 @@ export async function getLotteryStatusText(db: D1Database, groupId: number, user
     return `• ${displayName}: <b>${participant.ticket_count}</b> بلیت`;
   });
 
-  const userPending = await db
-    .prepare(`SELECT lottery_bonus_tickets FROM group_members WHERE telegram_group_id = ? AND telegram_user_id = ?`)
-    .bind(groupId, userId)
-    .first<{ lottery_bonus_tickets: number }>();
-
-  const pendingText = userPending && userPending.lottery_bonus_tickets > 0
-    ? `\n🎁 بلیت‌های رایگان در انتظار شما: <b>${userPending.lottery_bonus_tickets}</b>`
+  const registeredText = pendingBeforeCount > 0
+    ? `\n🎁 <b>${pendingBeforeCount}</b> بلیت رایگان شما در این دور ثبت شد.`
     : "";
 
   return (
@@ -376,8 +667,7 @@ export async function getLotteryStatusText(db: D1Database, groupId: number, user
     `💵 قیمت هر بلیت: <b>${round.ticket_price} MP</b>\n` +
     `💰 پات جاری: <b>${settings.lotteryPot} MP</b>\n` +
     `🎫 تعداد بلیت‌های این دور: <b>${totalTickets}</b>\n` +
-    `👥 شرکت‌کنندگان: <b>${participants.length}</b>\n` +
-    `${pendingText}\n\n` +
+    `👥 شرکت‌کنندگان: <b>${participants.length}</b>${registeredText}\n\n` +
     (participantLines.length > 0
       ? `📌 <b>برترین شرکت‌کنندگان</b>:\n${participantLines.join("\n")}${participants.length > 8 ? `\n… و ${participants.length - 8} شرکت‌کننده دیگر` : ""}`
       : `📌 هنوز هیچ بلیتی خریداری نشده است.\n`) +
@@ -421,6 +711,23 @@ export async function awardMeow(
     const taxAmount = Math.floor(effectivePoints * taxRate);
     const netPoints = Math.max(0, effectivePoints - taxAmount);
 
+    // Apply active booster multiplier (silent, per-group)
+    const boosterMult = await getActiveBoosterMultiplier(db, chat.id, user.id);
+    const boostedNetPoints = Math.round(netPoints * boosterMult);
+
+    // Read the current meow-credit so we can tell whether this meow completes a
+    // batch of 3 and earns a free lottery ticket. Safe under the group cooldown
+    // (a user can only earn one meow per cooldown window).
+    const creditRow = await db
+      .prepare(`SELECT lottery_meow_credit, total_meows FROM group_members WHERE telegram_group_id = ? AND telegram_user_id = ?`)
+      .bind(chat.id, user.id)
+      .first<{ lottery_meow_credit: number | null; total_meows: number | null }>();
+    const lotteryTicketEarned = creditRow?.lottery_meow_credit === 2;
+    const prevTotalMeows = creditRow?.total_meows ?? 0;
+    const newTotalMeows = prevTotalMeows + 1;
+    const milestone = newTotalMeows % 10 === 0;
+    const firstMeow = prevTotalMeows === 0;
+
     const result = await db.prepare(`
       INSERT INTO group_members (
         telegram_group_id, telegram_user_id, username, first_name, meow_points, total_meows, last_meow_at, lottery_bonus_tickets, lottery_meow_credit
@@ -431,10 +738,10 @@ export async function awardMeow(
         meow_points = group_members.meow_points + excluded.meow_points,
         total_meows = group_members.total_meows + 1,
         last_meow_at = excluded.last_meow_at,
-        lottery_bonus_tickets = group_members.lottery_bonus_tickets + CAST((group_members.lottery_meow_credit + 1) / 6 AS INTEGER),
-        lottery_meow_credit = (group_members.lottery_meow_credit + 1) % 6
+        lottery_bonus_tickets = group_members.lottery_bonus_tickets + CAST((group_members.lottery_meow_credit + 1) / 3 AS INTEGER),
+        lottery_meow_credit = (group_members.lottery_meow_credit + 1) % 3
       WHERE group_members.last_meow_at IS NULL OR group_members.last_meow_at < ?
-    `).bind(chat.id, user.id, user.username ?? null, user.first_name, netPoints, now, now - settings.cooldown).run();
+    `).bind(chat.id, user.id, user.username ?? null, user.first_name, boostedNetPoints, now, now - settings.cooldown).run();
 
     if (result.meta.changes === 0) {
       const row = await db.prepare(`SELECT last_meow_at FROM group_members WHERE telegram_group_id = ? AND telegram_user_id = ?`)
@@ -444,9 +751,9 @@ export async function awardMeow(
     }
 
     const operations = [
-      db.prepare(`UPDATE users SET meow_points = meow_points + ?, total_meows = total_meows + 1 WHERE telegram_id = ?`).bind(netPoints, user.id),
+      db.prepare(`UPDATE users SET meow_points = meow_points + ?, total_meows = total_meows + 1 WHERE telegram_id = ?`).bind(boostedNetPoints, user.id),
       db.prepare(`INSERT INTO transactions (telegram_user_id, group_id, amount, reason, created_at) VALUES (?, ?, ?, ?, ?)`)
-        .bind(user.id, chat.id, netPoints, "MEOW", now),
+        .bind(user.id, chat.id, boostedNetPoints, "MEOW", now),
     ];
 
     if (taxAmount > 0) {
@@ -459,7 +766,7 @@ export async function awardMeow(
 
     await db.batch(operations);
 
-    return { points: netPoints, basePoints, eventBonus, tier, taxAmount, taxRate, cooldown: false };
+    return { points: boostedNetPoints, basePoints, eventBonus, tier, taxAmount, taxRate, lotteryTicketEarned, milestone, firstMeow, cooldown: false, boosterMult };
   }
 
   await db.batch([
@@ -468,7 +775,7 @@ export async function awardMeow(
       .bind(user.id, null, effectivePoints, "MEOW", now),
   ]);
 
-  return { points: effectivePoints, basePoints, eventBonus, tier, taxAmount: 0, taxRate: 0, cooldown: false };
+  return { points: effectivePoints, basePoints, eventBonus, tier, taxAmount: 0, taxRate: 0, lotteryTicketEarned: false, milestone: false, firstMeow: false, cooldown: false, boosterMult: 1 };
 }
 
 export async function handleStart(token: string, db: D1Database, env: Bindings, message: TelegramMessage) {
@@ -477,17 +784,31 @@ export async function handleStart(token: string, db: D1Database, env: Bindings, 
 
   const activeEvent = await getActiveEvent(db, env);
 
-  await setMyCommands(token, [
-    { command: "start", description: "شروع کار با ربات" },
-    { command: "me", description: "پروفایل من" },
-    { command: "top", description: "رتبه‌بندی گروه" },
-    { command: "global", description: "رتبه جهانی" },
-    { command: "daily", description: "جایزه روزانه" },
-    { command: "pay", description: "انتقال امتیاز" },
-    { command: "lottery", description: "لاتاری / قمار گروه" },
-    { command: "gamble", description: "قمار در گروه" },
-    { command: "settings", description: "تنظیمات گروه" },
-  ]);
+  // Register the bot menu once per deployment instead of on every /start
+  // (an extra Telegram API call per user for zero benefit).
+  const registered = await db.prepare(`SELECT value FROM bot_settings WHERE key = 'commands_registered'`).first<{ value: string }>();
+  if (registered?.value !== "1") {
+    await setMyCommands(token, [
+      { command: "start", description: "شروع کار با ربات" },
+      { command: "me", description: "پروفایل من" },
+      { command: "top", description: "رتبه‌بندی گروه" },
+      { command: "history", description: "تاریخچه تراکنش‌ها" },
+      { command: "pay", description: "انتقال امتیاز" },
+      { command: "lottery", description: "لاتاری / قمار گروه" },
+      { command: "gamble", description: "قمار در گروه" },
+      { command: "dice", description: "تاس انداختن" },
+      { command: "poker", description: "پوکر تگزاس گروه" },
+      { command: "blackjack", description: "بلک‌جک گروه" },
+      { command: "events", description: "رویدادهای فعال" },
+      { command: "booster", description: "فروشگاه بوستر" },
+      { command: "groupstats", description: "آمار گروه" },
+      { command: "duelrank", description: "رتبه‌بندی دعوا" },
+      { command: "notifications", description: "مدیریت اعلان‌ها" },
+      { command: "treasury", description: "خزانه گروه" },
+      { command: "settings", description: "تنظیمات گروه" },
+    ]);
+    await db.prepare(`INSERT INTO bot_settings (key, value) VALUES ('commands_registered', '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run();
+  }
 
   const isPm = message.chat.type === "private";
   let text = isPm
@@ -511,7 +832,6 @@ export async function handleMe(token: string, db: D1Database, env: Bindings, mes
 
   const stats = await getUserStats(db, message.from.id);
   const activeEvent = await getActiveEvent(db, env);
-  const rank = await getGlobalRank(db, message.from.id);
   const duelRating = message.chat.type !== "private"
     ? await getDuelRating(db, message.from.id, message.chat.id)
     : await getDuelRating(db, message.from.id);
@@ -520,19 +840,49 @@ export async function handleMe(token: string, db: D1Database, env: Bindings, mes
     `🐱 پروفایل <b>${escapeHtml(message.from.first_name)}</b>\n\n` +
     `💰 امتیاز فعلی: <b>${stats?.meow_points ?? 0} MP</b>\n` +
     `🐾 کل میوها: <b>${stats?.total_meows ?? 0}</b>\n` +
-    `⚔️ ریتینگ دعوا: <b>${duelRating}</b>\n` +
-    `🏆 رتبه جهانی: <b>#${rank}</b>\n`;
+    `⚔️ ریتینگ دعوا: <b>${duelRating}</b>\n`;
+
+  // Duel W/L (global)
+  const duelStats = await db
+    .prepare(`
+      SELECT
+        SUM(CASE WHEN reason LIKE 'DUEL_WIN%' THEN 1 ELSE 0 END) as wins,
+        SUM(CASE WHEN reason LIKE 'DUEL_LOSS%' THEN 1 ELSE 0 END) as losses
+      FROM transactions WHERE telegram_user_id = ?
+    `)
+    .bind(message.from.id)
+    .first<{ wins: number | null; losses: number | null }>();
+  const duelWins = duelStats?.wins ?? 0;
+  const duelLosses = duelStats?.losses ?? 0;
+  if (duelWins + duelLosses > 0) {
+    text += `⚔️ دعوا: <b>${duelWins}</b> برد / <b>${duelLosses}</b> باخت\n`;
+  }
+
+  // Lottery wins (global)
+  const lotteryWinCount = await getLotteryWins(db, message.from.id);
+  if (lotteryWinCount > 0) {
+    text += `🎰 برد لاتاری: <b>${lotteryWinCount}</b> بار\n`;
+  }
 
   if (message.chat.type === "group" || message.chat.type === "supergroup") {
     const groupBalance = await getGroupMemberBalance(db, message.chat.id, message.from.id);
     const groupRank = await getGroupRank(db, message.chat.id, message.from.id);
     const badgeTitle = getBadgeTitle(stats?.total_meows ?? 0);
+    const meTitle = await getActiveTitle(db, message.chat.id, message.from.id);
+    const booster = await getBoosterStatus(db, message.chat.id, message.from.id);
     text += `\n💳 موجودی این گروه: <b>${groupBalance} MP</b>\n`;
     text += `🏅 رتبه گروه: <b>#${groupRank}</b>\n`;
     text += `🎖️ نشان: <b>${badgeTitle}</b>\n`;
+    if (meTitle) {
+      text += `🏅 عنوان: ${titleBadge(meTitle.name, meTitle.last_price, meTitle.emoji)}\n`;
+    }
+    if (booster) {
+      const mins = Math.ceil((booster.until - Math.floor(Date.now() / 1000)) / 60);
+      text += `🚀 بوستر: <b>${booster.multiplier}×</b> (${mins} دقیقه باقی‌مانده)\n`;
+    }
   }
 
-  text += `\n✨ برای رشد بیشتر، توی گروه‌ها میو بگو و از /daily هم جایزه بگیر.`;
+  text += `\n✨ برای رشد بیشتر، توی گروه‌ها میو بگو و با دوستانت دعوا کن.`;
 
   await sendMessage(token, message.chat.id, text, { reply_markup: mainMenuKeyboard(message.from?.id) });
 }
@@ -652,11 +1002,11 @@ export async function handleEvents(token: string, db: D1Database, env: Bindings,
 
   const rows = await db
     .prepare(`
-      SELECT COUNT(*) as total_meows, SUM(CASE WHEN created_at >= ? THEN amount ELSE 0 END) as today_points
+      SELECT SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END) as total_meows, SUM(CASE WHEN created_at >= ? THEN amount ELSE 0 END) as today_points
       FROM transactions
       WHERE reason = 'MEOW' AND (${groupId === null ? "group_id IS NULL" : "group_id = ?"})
     `)
-    .bind(dayStart, ...(groupId === null ? [] : [groupId]))
+    .bind(dayStart, dayStart, ...(groupId === null ? [] : [groupId]))
     .first<{ total_meows: number; today_points: number }>();
 
   const activeEvent = await getActiveEvent(db, env);
@@ -682,13 +1032,14 @@ export async function handleEvents(token: string, db: D1Database, env: Bindings,
   await sendMessage(token, message.chat.id, `${eventText}✨ فعلاً رویداد فعالی وجود ندارد.`, { reply_markup: keyboard });
 }
 
-function formatLeaderboard(rows: { first_name: string; username: string | null; meow_points: number }[]) {
+function formatLeaderboard(rows: { first_name: string; username: string | null; meow_points: number; title_name?: string | null; title_price?: number | null; title_emoji?: string | null }[]) {
   const medals = ["🥇", "🥈", "🥉"];
   return rows
     .map((u, i) => {
       const medal = medals[i] || `${i + 1}.`;
       const name = escapeHtml(u.first_name || u.username || "Unknown Cat");
-      return `${medal} ${name} — ${u.meow_points} MP`;
+      const display = u.title_name ? titleBadge(u.title_name, u.title_price, u.title_emoji) : name;
+      return `${medal} ${display} — ${u.meow_points} MP`;
     })
     .join("\n");
 }
@@ -701,14 +1052,15 @@ export async function handleTop(token: string, db: D1Database, message: Telegram
 
   const results = await db
     .prepare(`
-      SELECT first_name, username, meow_points
-      FROM group_members
-      WHERE telegram_group_id = ?
-      ORDER BY meow_points DESC
+      SELECT gm.first_name, gm.username, gm.meow_points, t.name AS title_name, t.last_price AS title_price, t.emoji AS title_emoji
+      FROM group_members gm
+      LEFT JOIN titles t ON t.id = gm.active_title_id AND t.telegram_group_id = gm.telegram_group_id
+      WHERE gm.telegram_group_id = ?
+      ORDER BY gm.meow_points DESC
       LIMIT 10
     `)
     .bind(message.chat.id)
-    .all<{ first_name: string; username: string | null; meow_points: number }>();
+    .all<{ first_name: string; username: string | null; meow_points: number; title_name: string | null; title_price: number | null; title_emoji: string | null }>();
 
   if (!results.results.length) {
     await sendMessage(token, message.chat.id, "🐱 هنوز کسی Meow نکرده!");
@@ -726,24 +1078,6 @@ export async function handleTop(token: string, db: D1Database, message: Telegram
   }
 
   await sendMessage(token, message.chat.id, text);
-}
-
-export async function handleGlobal(token: string, db: D1Database, message: TelegramMessage) {
-  const results = await db
-    .prepare(`
-      SELECT first_name, username, meow_points
-      FROM users
-      ORDER BY meow_points DESC
-      LIMIT 10
-    `)
-    .all<{ first_name: string; username: string | null; meow_points: number }>();
-
-  if (!results.results.length) {
-    await sendMessage(token, message.chat.id, "🐱 هنوز کسی Meow نکرده!");
-    return;
-  }
-
-  await sendMessage(token, message.chat.id, `🌍 <b>Global Meow Leaderboard</b>\n\n${formatLeaderboard(results.results)}`);
 }
 
 export async function handleDuelRank(token: string, db: D1Database, message: TelegramMessage) {
@@ -776,6 +1110,107 @@ export async function handleDuelRank(token: string, db: D1Database, message: Tel
   await sendMessage(token, message.chat.id, text);
 }
 
+export async function handleBooster(token: string, db: D1Database, message: TelegramMessage) {
+  if (!message.from) return;
+  if (message.chat.type !== "group" && message.chat.type !== "supergroup") {
+    await sendMessage(token, message.chat.id, "🚀 بوستر فقط داخل گروه کار می‌کند!");
+    return;
+  }
+
+  await ensureGroup(db, message.chat);
+  await ensureUser(db, message.from);
+
+  const groupId = message.chat.id;
+  const userId = message.from.id;
+  const status = await getBoosterStatus(db, groupId, userId);
+
+  let text = `🚀 <b>فروشگاه بوستر</b>\n\n`;
+  text += `بوستر ضریب دریافت میو را در این گروه افزایش می‌دهد.\n`;
+  text += `فقط روی میوهای این گروه تأثیر دارد.\n\n`;
+
+  if (status) {
+    const remaining = status.until - Math.floor(Date.now() / 1000);
+    const mins = Math.ceil(remaining / 60);
+    text += `🟢 <b>بوستر فعال:</b> ${status.multiplier}× (باقی‌مانده: ${mins} دقیقه)\n\n`;
+  }
+
+  text += `💰 موجودی گروه شما: <b>${await getGroupMemberBalance(db, groupId, userId)} MP</b>\n\n`;
+  text += `💡 هر بوستر ۱ ساعت اعتبار دارد، جایگزین بوستر قبلی می‌شود و بین دو خرید باید ${Math.round(BOOSTER_COOLDOWN_SEC / 3600)} ساعت فاصله باشد.`;
+
+  await sendMessage(token, message.chat.id, text, { reply_markup: boosterKeyboard(message.from.id) });
+}
+
+/** Buy a booster tier from the 🚀 بوستر store (booster:buy:<tierId> callback). */
+export async function handleBoosterBuy(token: string, db: D1Database, callback: TelegramCallbackQuery, tierId: string) {
+  if (!callback.message || !callback.from) return;
+  if (callback.message.chat.type !== "group" && callback.message.chat.type !== "supergroup") {
+    await answerCallback(token, callback.id, "🚀 بوستر فقط داخل گروه کار می‌کند!", true);
+    return;
+  }
+  const tier = findBoosterTier(tierId);
+  if (!tier) {
+    await answerCallback(token, callback.id, "🚀 این بوستر وجود ندارد.", true);
+    return;
+  }
+
+  const result = await buyBooster(db, callback.message.chat.id, callback.from.id, tier.multiplier, tier.durationSec, tier.cost);
+  if (!result.success) {
+    if (result.reason === "cooldown") {
+      await answerCallback(token, callback.id, `⏳ بوستر اخیراً خریده‌ای. هر ${Math.round(BOOSTER_COOLDOWN_SEC / 3600)} ساعت یک‌بار می‌توانی بوستر بخری.`, true);
+      return;
+    }
+    await answerCallback(token, callback.id, `🐱 موجودی کافی نیست (نیاز: ${tier.cost.toLocaleString("en-US")} MP).`, true);
+    return;
+  }
+
+  await answerCallback(token, callback.id, `✅ بوستر <b>${tier.label}</b> فعال شد (${tier.multiplier}× برای ${tier.durationSec / 60} دقیقه).`);
+}
+
+export async function handleGroupStats(token: string, db: D1Database, message: TelegramMessage) {
+  if (!message.from) return;
+  if (message.chat.type !== "group" && message.chat.type !== "supergroup") {
+    await sendMessage(token, message.chat.id, "📊 آمار گروه فقط داخل گروه کار می‌کند!");
+    return;
+  }
+
+  await ensureGroup(db, message.chat);
+  const stats = await getGroupStats(db, message.chat.id);
+
+  const topName = stats.topMeower
+    ? escapeHtml(stats.topMeower.username ? `@${stats.topMeower.username}` : stats.topMeower.first_name ?? ".Unknown")
+    : "—";
+  const topPoints = stats.topMeower?.meow_points ?? 0;
+
+  const text =
+    `📊 <b>آمار گروه ${escapeHtml(message.chat.title ?? "")}</b>\n\n` +
+    `🐱 کل میوها: <b>${stats.totalMeows.toLocaleString("en-US")}</b>\n` +
+    `👥 اعضا: <b>${stats.memberCount}</b>\n` +
+    `💰 خزانه گروه: <b>${stats.treasuryBalance.toLocaleString("en-US")} MP</b>\n` +
+    `🎰 پات لاتاری: <b>${stats.lotteryPot.toLocaleString("en-US")} MP</b>\n\n` +
+    `🏆 <b>پادشاه میو:</b> ${topName} — ${topPoints.toLocaleString("en-US")} MP`;
+
+  await sendMessage(token, message.chat.id, text);
+}
+
+export async function handleNotifications(token: string, db: D1Database, message: TelegramMessage) {
+  if (!message.from) return;
+  const text = (message.text || "").trim().toLowerCase();
+  const parts = text.split(/\s+/);
+  const sub = parts[1];
+
+  if (sub === "off") {
+    await setNotificationsEnabled(db, message.from.id, false);
+    await sendMessage(token, message.chat.id, "🔕 اعلان‌ها غیرفعال شدند. برای فعال کردن مجدد: /notifications on");
+  } else if (sub === "on") {
+    await setNotificationsEnabled(db, message.from.id, true);
+    await sendMessage(token, message.chat.id, "🔔 اعلان‌ها فعال شدند. برای غیرفعال کردن: /notifications off");
+  } else {
+    const enabled = await getNotificationsEnabled(db, message.from.id);
+    const status = enabled ? "✅ فعال" : "❌ غیرفعال";
+    await sendMessage(token, message.chat.id, `🔔 <b>وضعیت اعلان‌ها:</b> ${status}\n\n برای تغییر:\n• /notifications on — فعال\n• /notifications off — غیرفعال`);
+  }
+}
+
 export async function handleTreasury(token: string, db: D1Database, message: TelegramMessage) {
   if (!message.from) return;
   if (message.chat.type === "private") {
@@ -802,120 +1237,88 @@ export async function handleTreasury(token: string, db: D1Database, message: Tel
   await sendMessage(token, message.chat.id, text, { reply_markup: treasuryKeyboard(settings.treasuryBalance, message.from?.id) });
 }
 
-export async function handleClan(token: string, db: D1Database, message: TelegramMessage) {
+/**
+ * `خزانه` — show the group treasury.
+ * `خزانه {amount}` — set the group treasury to the exact amount (owner only).
+ */
+export async function handleTreasuryCommand(
+  token: string,
+  db: D1Database,
+  env: Bindings,
+  message: TelegramMessage
+) {
   if (!message.from) return;
   if (message.chat.type === "private") {
-    await sendMessage(token, message.chat.id, "🐱 قبیله فقط در گروه قابل استفاده است!");
+    await sendMessage(token, message.chat.id, "🐱 خزانه گروه فقط داخل گروه قابل دسترس است!");
     return;
   }
 
   await ensureGroup(db, message.chat);
-  await ensureUser(db, message.from);
-
   const parts = (message.text || "").split(" ").filter(Boolean);
-  if (parts.length >= 3 && parts[1].toLowerCase() === "create") {
-    const clanName = parts.slice(2).join(" ").trim();
-    if (!clanName) {
-      await sendMessage(token, message.chat.id, "🐱 نام قبیله معتبر نیست.");
+  if (parts.length >= 2) {
+    if (env.BOT_OWNER_ID !== String(message.from.id)) {
+      await sendMessage(token, message.chat.id, "🚫 فقط صاحب ربات می‌تواند خزانه را تنظیم کند.");
       return;
     }
-    const clanId = await createGroupClan(db, message.chat.id, clanName, message.from.id);
-    if (!clanId) {
-      await sendMessage(token, message.chat.id, "🐱 قبلاً قبیله‌ای با این نام وجود دارد یا شما در قبیله دیگری هستید.");
+    const amount = safeParseAmount(parts[1]);
+    if (amount === null || amount < 0) {
+      await sendMessage(token, message.chat.id, "🐱 مقدار نامعتبر است.\n<code>خزانه 50000</code>");
       return;
     }
-    await joinClan(db, clanId, message.from.id);
-    await sendMessage(token, message.chat.id, `✅ قبیله <b>${escapeHtml(clanName)}</b> ایجاد شد و شما مالک آن هستید!`, { reply_markup: clanKeyboard(true, message.from?.id) });
+    const before = await db
+      .prepare(`SELECT treasury_balance FROM telegram_groups WHERE telegram_group_id = ?`)
+      .bind(message.chat.id)
+      .first<{ treasury_balance: number }>();
+    const balanceBefore = before?.treasury_balance ?? 0;
+    const now = Math.floor(Date.now() / 1000);
+    await db.batch([
+      db.prepare(`UPDATE telegram_groups SET treasury_balance = ? WHERE telegram_group_id = ?`).bind(amount, message.chat.id),
+      db.prepare(
+        `INSERT INTO group_treasury_transactions (telegram_group_id, telegram_user_id, amount, balance_before, balance_after, reason, reference_type, reference_id, created_at) VALUES (?, NULL, ?, ?, ?, 'owner:set', 'owner', NULL, ?)`
+      ).bind(message.chat.id, amount - balanceBefore, balanceBefore, amount, now),
+    ]);
+    await sendMessage(token, message.chat.id, `✅ خزانه گروه به <b>${amount} MP</b> تنظیم شد.`);
     return;
   }
 
-  if (parts.length >= 3 && parts[1].toLowerCase() === "join") {
-    const clanName = parts.slice(2).join(" ").trim();
-    if (!clanName) {
-      await sendMessage(token, message.chat.id, "🐱 نام قبیله معتبر نیست.");
-      return;
-    }
-    const clan = await getGroupClanByName(db, message.chat.id, clanName);
-    if (!clan) {
-      await sendMessage(token, message.chat.id, "🐱 قبیله‌ای با این نام پیدا نشد.");
-      return;
-    }
-    const joined = await joinClan(db, clan.clan_id, message.from.id);
-    if (!joined) {
-      await sendMessage(token, message.chat.id, "🐱 شما قبلاً در این قبیله هستید یا عضو قبیله دیگری هستید.");
-      return;
-    }
-    await sendMessage(token, message.chat.id, `✅ شما به قبیله <b>${escapeHtml(clan.name)}</b> پیوستید!`, { reply_markup: clanKeyboard(true, message.from?.id) });
-    return;
-  }
-
-  const userClan = await getUserClan(db, message.chat.id, message.from.id);
-  if (!userClan) {
-    await sendMessage(token, message.chat.id, `👥 شما هنوز قبیله‌ای ندارید.
-
-برای ایجاد قبیله از:
-<code>/clan create نام_قبیله</code>
-
-برای پیوستن به قبیله از:
-<code>/clan join نام_قبیله</code>`, { reply_markup: clanKeyboard(false, message.from?.id) });
-    return;
-  }
-
-  const members = await getClanMembers(db, userClan.clan_id);
-  let text = `👥 <b>قبیله ${escapeHtml(userClan.name)}</b>\n`;
-  text += `مالک: <b>${userClan.owner_user_id}</b>\n`;
-  text += `خزانه قبیله: <b>${userClan.treasury_balance} MP</b>\n`;
-  text += `اعضا: <b>${members.results.length}</b>\n\n`;
-  text += members.results.map((member, index) => `${index + 1}. ${member.telegram_user_id} (${escapeHtml(member.role)})`).join("\n");
-
-  await sendMessage(token, message.chat.id, text, { reply_markup: clanKeyboard(true, message.from?.id) });
+  await handleTreasury(token, db, message);
 }
 
-export async function handleDaily(token: string, db: D1Database, message: TelegramMessage) {
+/**
+ * `پات` — show the group lottery pot.
+ * `پات {amount}` — set the pot to the exact amount (owner only).
+ */
+export async function handlePotCommand(
+  token: string,
+  db: D1Database,
+  env: Bindings,
+  message: TelegramMessage
+) {
   if (!message.from) return;
-  if (message.chat.type !== "private") {
-    await sendMessage(token, message.chat.id, "🐱 /daily فقط در چت خصوصی ربات قابل استفاده است. لطفاً در چت خصوصی با ربات بنویس.");
+  if (message.chat.type === "private") {
+    await sendMessage(token, message.chat.id, "🐱 پات فقط داخل گروه قابل دسترس است!");
     return;
   }
 
-  await ensureUser(db, message.from);
-
-  const now = Math.floor(Date.now() / 1000);
-  const user = await db
-    .prepare(`SELECT meow_points, last_daily_at, daily_streak FROM users WHERE telegram_id = ?`)
-    .bind(message.from.id)
-    .first<{ meow_points: number; last_daily_at: number | null; daily_streak: number }>();
-
-  const hasDaily = user?.last_daily_at && now - user.last_daily_at < 86400;
-  if (hasDaily) {
-    const remaining = 86400 - (now - user!.last_daily_at!);
-    const hours = Math.ceil(remaining / 3600);
-    let text = `🎁 جایزه امروزت رو قبلاً گرفتی!\n\n⏰ حدود ${hours} ساعت دیگه دوباره امتحان کن.`;
-
-    await sendMessage(token, message.chat.id, text);
+  await ensureGroup(db, message.chat);
+  const parts = (message.text || "").split(" ").filter(Boolean);
+  if (parts.length >= 2) {
+    if (env.BOT_OWNER_ID !== String(message.from.id)) {
+      await sendMessage(token, message.chat.id, "🚫 فقط صاحب ربات می‌تواند پات را تنظیم کند.");
+      return;
+    }
+    const amount = safeParseAmount(parts[1]);
+    if (amount === null || amount < 0) {
+      await sendMessage(token, message.chat.id, "🐱 مقدار نامعتبر است.\n<code>پات 50000</code>");
+      return;
+    }
+    await setGroupLotteryPot(db, message.chat.id, amount);
+    await sendMessage(token, message.chat.id, `✅ پات گروه به <b>${amount} MP</b> تنظیم شد.`);
     return;
   }
 
-  const streak =
-    user?.last_daily_at && now - user.last_daily_at > 172800
-      ? 1
-      : (user?.daily_streak ?? 0) + 1;
-
-  const reward = 500;
-
-  await db
-    .prepare(`UPDATE users SET meow_points = meow_points + ?, daily_streak = ?, last_daily_at = ? WHERE telegram_id = ?`)
-    .bind(reward, streak, now, message.from.id)
-    .run();
-
-  await db
-    .prepare(`INSERT INTO transactions (telegram_user_id, amount, reason, created_at) VALUES (?, ?, ?, ?)`)
-    .bind(message.from.id, reward, "DAILY_REWARD", now)
-    .run();
-
-  const text = `🎁 <b>جایزه روزانه!</b>\n\n💰 +${reward} امتیاز\n🔥 استریک: ${streak} روز\n\n✨ برای دیدن وضعیتت، از /me استفاده کن.`;
-
-  await sendMessage(token, message.chat.id, text);
+  const settings = await getGroupLotteryConfig(db, message.chat.id);
+  await sendMessage(token, message.chat.id, `💰 <b>پات گروه</b>: <b>${settings.lotteryPot} MP</b>\n\n🎟️ این پات برای لاتاری گروه استفاده می‌شود.`);
 }
 
 export async function handleLottery(token: string, db: D1Database, env: Bindings, message: TelegramMessage) {
@@ -925,8 +1328,13 @@ export async function handleLottery(token: string, db: D1Database, env: Bindings
   }
 
   await ensureGroup(db, message.chat);
+  // Register any pending free tickets (earned by meowing) into the open round.
+  await allocatePendingLotteryTickets(db, message.chat.id);
   const settings = await getGroupLotteryConfig(db, message.chat.id);
   const isOwner = message.from?.id !== undefined && env.BOT_OWNER_ID === String(message.from.id);
+  // The 🎯 draw button also shows for group admins (server-side check in the
+  // lottery:draw callback branch); the /lottery command is group-only.
+  const canDraw = isOwner || (message.from ? await isGroupAdmin(token, message.chat.id, message.from.id) : false);
 
   const parts = (message.text || "").split(" ").filter(Boolean);
   if (parts.length >= 2) {
@@ -937,7 +1345,7 @@ export async function handleLottery(token: string, db: D1Database, env: Bindings
         await sendMessage(token, message.chat.id, "🎟️ لاتاری فعلا غیرفعال است.");
         return;
       }
-      const count = Math.min(10, Math.max(1, Number.parseInt(parts[2] || "1", 10) || 1));
+      const count = Math.min(10, Math.max(1, Number.parseInt(toEnglishNumbers(parts[2] || "1"), 10) || 1));
       const res = await purchaseLotteryTickets(db, message.chat.id, message.from.id, count);
       if (!res.success) {
         if (res.reason === "insufficient_funds") {
@@ -948,13 +1356,14 @@ export async function handleLottery(token: string, db: D1Database, env: Bindings
         return;
       }
       const numbersText = res.numbers?.map((nums, index) => `🎫 بلیت ${index + 1}: ${nums.split(",").join(", ")}`).join("\n") ?? "-";
+      const freeText = res.allocated > 0 ? `\n\n🎁 <b>${res.allocated}</b> بلیت رایگان شما هم در این دور ثبت شد.` : "";
       await sendMessage(token, message.chat.id,
         `🎫 <b>خرید بلیت موفق</b>
 
 تعداد بلیت: <b>${count}</b>
 شماره دور: <b>${res.roundId}</b>
 
-${numbersText}
+${numbersText}${freeText}
 
 📈 شانس تقریبی: 3 عدد ~5%، 4 عدد ~3%، 5 عدد ~1%، 6 عدد ~0.01%\n` +
         `💡 برای خرید سریع‌تر: /lottery buy 3 یا /gamble buy 3`
@@ -965,7 +1374,7 @@ ${numbersText}
 
     if (sub === "status") {
       await sendMessage(token, message.chat.id, formatLotteryStatusText(settings), {
-        reply_markup: lotteryKeyboard(isOwner, message.from?.id),
+        reply_markup: lotteryKeyboard(isOwner, message.from?.id, canDraw),
         parse_mode: "HTML",
       });
       return;
@@ -974,7 +1383,7 @@ ${numbersText}
       if (sub === "tickets" || sub === "mytickets" || sub === "my_tickets") {
         const text = await getLotteryTicketSummary(db, message.chat.id, message.from?.id ?? 0);
         await sendMessage(token, message.chat.id, text, {
-          reply_markup: lotteryKeyboard(isOwner, message.from?.id),
+          reply_markup: lotteryKeyboard(isOwner, message.from?.id, canDraw),
           parse_mode: "HTML",
         });
         return;
@@ -989,7 +1398,7 @@ ${numbersText}
       }
       const arg = parts[2]?.toLowerCase();
       if (arg === 'price' && parts[3]) {
-        const newPrice = parseInt(parts[3], 10);
+        const newPrice = parseInt(toEnglishNumbers(parts[3]), 10);
         if (!Number.isFinite(newPrice) || newPrice <= 0) {
           await sendMessage(token, message.chat.id, '❌ قیمت صحیح نیست.');
           return;
@@ -1012,7 +1421,7 @@ ${numbersText}
   }
 
   await sendMessage(token, message.chat.id, formatLotteryStatusText(settings), {
-    reply_markup: lotteryKeyboard(isOwner, message.from?.id),
+    reply_markup: lotteryKeyboard(isOwner, message.from?.id, canDraw),
     parse_mode: "HTML",
   });
 }
@@ -1033,10 +1442,13 @@ export async function handleDice(token: string, db: D1Database, env: Bindings, m
 
   const die1 = Math.floor(Math.random() * 6) + 1;
   const die2 = Math.floor(Math.random() * 6) + 1;
-  const reward = die1 === die2 ? Math.floor(Math.random() * 501) + 1500 : 0;
+  const isPair = die1 === die2;
+  const isDoubleSix = isPair && die1 === 6;
+  let reward = isPair ? Math.floor(Math.random() * 501) + 1500 : 0;
+  if (isDoubleSix) reward *= 2;
 
-  const batch = [
-    db.prepare(`INSERT INTO group_members (
+  const diceUpsert = await db
+    .prepare(`INSERT INTO group_members (
       telegram_group_id, telegram_user_id, username, first_name, meow_points, total_meows, last_meow_at, last_dice_at
     ) VALUES (?, ?, ?, ?, ?, 0, NULL, ?)
     ON CONFLICT(telegram_group_id, telegram_user_id) DO UPDATE SET
@@ -1045,19 +1457,10 @@ export async function handleDice(token: string, db: D1Database, env: Bindings, m
       meow_points = group_members.meow_points + excluded.meow_points,
       last_dice_at = excluded.last_dice_at
     WHERE group_members.last_dice_at IS NULL OR group_members.last_dice_at < ?`)
-      .bind(message.chat.id, message.from.id, message.from.username ?? null, message.from.first_name, reward, now, now - DICE_COOLDOWN_SEC),
-  ];
+    .bind(message.chat.id, message.from.id, message.from.username ?? null, message.from.first_name, reward, now, now - DICE_COOLDOWN_SEC)
+    .run();
 
-  if (reward > 0) {
-    batch.push(
-      db.prepare(`UPDATE users SET meow_points = meow_points + ? WHERE telegram_id = ?`).bind(reward, message.from.id),
-      db.prepare(`INSERT INTO transactions (telegram_user_id, group_id, amount, reason, created_at) VALUES (?, ?, ?, ?, ?)`)
-        .bind(message.from.id, message.chat.id, reward, 'DICE_REWARD', now)
-    );
-  }
-
-  const diceResult = await db.batch(batch);
-  if (!diceResult[0].meta.changes) {
+  if (!diceUpsert.meta.changes) {
     const cooldownRow = await db
       .prepare(`SELECT last_dice_at FROM group_members WHERE telegram_group_id = ? AND telegram_user_id = ?`)
       .bind(message.chat.id, message.from.id)
@@ -1067,18 +1470,39 @@ export async function handleDice(token: string, db: D1Database, env: Bindings, m
     return;
   }
 
+  // Only reward after the cooldown guard confirmed the roll counts — otherwise
+  // a cooldown hit would still credit the global balance.
+  if (reward > 0) {
+    await db.batch([
+      db.prepare(`UPDATE users SET meow_points = meow_points + ? WHERE telegram_id = ?`).bind(reward, message.from.id),
+      db.prepare(`INSERT INTO transactions (telegram_user_id, group_id, amount, reason, created_at) VALUES (?, ?, ?, ?, ?)`)
+        .bind(message.from.id, message.chat.id, reward, 'DICE_REWARD', now),
+    ]);
+  }
+
+  const diceTitle = await getActiveTitle(db, message.chat.id, message.from.id);
   const text =
+    (diceTitle ? `${titleBadge(diceTitle.name, diceTitle.last_price, diceTitle.emoji)}\n` : "") +
     `تاس انداختی:\n\n` +
     `• عدد اول: <b>${die1}</b>\n` +
     `• عدد دوم: <b>${die2}</b>\n\n` +
     (reward > 0
-      ? `🎉 معجزه‌ی تاس! دو عدد برابر آوردی و به‌صورت شانسی <b>${reward} MP</b> برنده شدی. پولت را چک کن و ببین چه معجزه‌ای از مسیرت عبور کرد!`
-      : `😿 این بار دو عدد برابر نشدند. فقط وقتی هر دو تاس یک عدد بیاورند، جایزهٔ کافی دریافت می‌کنی. دفعه‌ی بعد بهتر می‌شه!`);
+      ? isDoubleSix
+        ? `🎉🎲 <b>شش شش! جک‌پات!</b> 🎲🎉\nهر دو تاس ۶ آوردی و جایزه‌ات <b>دوبرابر</b> شد!\n💰 <b>${reward} MP</b> به حسابت اضافه شد!`
+        : `🎉 معجزه‌ی تاس! دو عدد برابر آوردی و به‌صورت شانسی <b>${reward} MP</b> برنده شدی. پولت را چک کن و ببین چه معجزه‌ای از مسیرت عبور کرد!`
+      : `😿 این بار دو عدد برابر نشدند. فقط وقتی هر دو تاس یک عدد بیاورند، جایزه دریافت می‌کنی. دفعه‌ی بعد بهتر می‌شه!`);
 
   await sendMessage(token, message.chat.id, text);
 }
 
 export async function getLotteryTicketSummary(db: D1Database, groupId: number, userId: number) {
+  // Capture pending free tickets BEFORE allocation (allocation zeroes the counter).
+  const pendingBefore = await db
+    .prepare(`SELECT lottery_bonus_tickets FROM group_members WHERE telegram_group_id = ? AND telegram_user_id = ?`)
+    .bind(groupId, userId)
+    .first<{ lottery_bonus_tickets: number }>();
+  const pendingBeforeCount = pendingBefore?.lottery_bonus_tickets ?? 0;
+
   await allocatePendingLotteryTickets(db, groupId);
 
   const round = await db
@@ -1087,7 +1511,10 @@ export async function getLotteryTicketSummary(db: D1Database, groupId: number, u
     .first<{ id: number; round_number: number; ticket_price: number }>();
 
   if (!round) {
-    return `🎫 <b>هیچ دور بازی فعالی وجود ندارد.</b>\n\nوقتی دور جدید شروع شود، می‌توانی بلیت بخری و شماره‌های خود را ببینی.`;
+    const pendingText = pendingBeforeCount > 0
+      ? `\n\n🎁 بلیت رایگان در انتظار شما: <b>${pendingBeforeCount}</b> — به محض شروع دور جدید، خودکار ثبت می‌شود.`
+      : "";
+    return `🎫 <b>هیچ دور بازی فعالی وجود ندارد.</b>\n\nوقتی دور جدید شروع شود، می‌توانی بلیت بخری و شماره‌های خود را ببینی.${pendingText}`;
   }
 
   const tickets = await db
@@ -1096,14 +1523,7 @@ export async function getLotteryTicketSummary(db: D1Database, groupId: number, u
     .all<{ numbers: string }>();
 
   if (!tickets.results.length) {
-    const pendingRow = await db
-      .prepare(`SELECT lottery_bonus_tickets FROM group_members WHERE telegram_group_id = ? AND telegram_user_id = ?`)
-      .bind(groupId, userId)
-      .first<{ lottery_bonus_tickets: number }>();
-    const pendingTickets = pendingRow?.lottery_bonus_tickets || 0;
-    const pendingText = pendingTickets > 0 ? `\n\n🎁 بلیت رایگان در انتظار شما: <b>${pendingTickets}</b>` : "";
-
-    return `🎫 <b>بلیتی برای دور ${round.round_number} نخریده‌ای.</b>\n\nبرای خرید بلیت از /lottery buy 1 یا دکمه‌های لاتاری استفاده کن.${pendingText}`;
+    return `🎫 <b>بلیتی برای دور ${round.round_number} نخریده‌ای.</b>\n\nبرای خرید بلیت از /lottery buy 1 یا دکمه‌های لاتاری استفاده کن.`;
   }
 
   const ticketLines = tickets.results.map((ticket, index) => `• بلیت ${index + 1}: <code>${escapeHtml(ticket.numbers)}</code>`).join("\n");
@@ -1129,7 +1549,7 @@ function formatLotteryHelpText(settings: {
     `• هر بلیت شامل 6 عدد یکتا از 1 تا 49 است.\n` +
     `• قیمت هر بلیت: <b>${settings.lotteryTicketPrice} MP</b>\n` +
     `• پات جاری: <b>${settings.lotteryPot} MP</b>\n\n` +
-    `🎁 هر 6 میو دریافتی در گروه، یک بلیت رایگان برای دور بعد به شما می‌دهد.\n` +
+    `🎁 هر 3 میو دریافتی در گروه، یک بلیت رایگان برای دور بعد به شما می‌دهد.\n` +
     `📈 شانس تقریبی:\n` +
     `• 3 عدد: ~5%\n` +
     `• 4 عدد: ~3%\n` +
@@ -1231,10 +1651,15 @@ export async function handlePay(token: string, db: D1Database, message: Telegram
     return;
   }
 
+  const fromTitle = await getActiveTitle(db, message.chat.id, message.from.id);
+  const toTitle = await getActiveTitle(db, message.chat.id, targetUser.telegram_id);
+  const fromLabel = fromTitle ? titleBadge(fromTitle.name, fromTitle.last_price, fromTitle.emoji) : `🐱 ${escapeHtml(message.from.first_name)}`;
+  const toLabel = toTitle ? titleBadge(toTitle.name, toTitle.last_price, toTitle.emoji) : `🐱 ${escapeHtml(targetUser.first_name)}`;
+
   await sendMessage(
     token,
     message.chat.id,
-    `💸 <b>انتقال موفق!</b>\n\n🐱 ${escapeHtml(message.from.first_name)}\n➡️ ${amount} MP\n🐱 ${escapeHtml(targetUser.first_name)}\n\n✨ هم‌اکنون لیدربورد گروه هم به‌روز شده.`
+    `💸 <b>انتقال موفق!</b>\n\n${fromLabel}\n➡️ ${amount} MP\n${toLabel}\n\n✨ هم‌اکنون لیدربورد گروه هم به‌روز شده.`
   );
 }
 
@@ -1324,19 +1749,23 @@ export async function handleDuelRequest(
   const nowSec = Math.floor(Date.now() / 1000);
   const challengerRating = await getDuelRating(db, message.from.id, message.chat.id);
   const targetRating = await getDuelRating(db, target.id, message.chat.id);
+  const challengerTitle = await getActiveTitle(db, message.chat.id, message.from.id);
+  const targetTitle = await getActiveTitle(db, message.chat.id, target.id);
+  const challengerLabel = challengerTitle ? titleBadge(challengerTitle.name, challengerTitle.last_price, challengerTitle.emoji) : `🐱 ${escapeHtml(message.from.first_name)}`;
+  const targetLabel = targetTitle ? titleBadge(targetTitle.name, targetTitle.last_price, targetTitle.emoji) : `🐱 ${escapeHtml(target.first_name)}`;
 
   const res = await telegramRequest(token, "sendMessage", {
     chat_id: message.chat.id,
     text:
       `⚔️ <b>دعوای Meow!</b>\n\n` +
-      `🐱 ${escapeHtml(message.from.first_name)} <b>(${challengerRating})</b>\n` +
+      `${challengerLabel} <b>(${challengerRating})</b>\n` +
       `🆚\n` +
-      `🐱 ${escapeHtml(target.first_name)} <b>(${targetRating})</b>\n\n` +
+      `${targetLabel} <b>(${targetRating})</b>\n\n` +
       `💰 شرط: <b>${amount} MP</b>\n` +
       `🏆 برنده: <b>${amount * 2} MP</b>\n\n` +
       `⏱️ ${DUEL_TIMEOUT_SEC} ثانیه فرصت داری قبول کنی!`,
     parse_mode: "HTML",
-    reply_markup: duelKeyboard(duelId, target.id),
+    reply_markup: duelKeyboard(duelId, target.id, message.from.id),
   });
 
   const duel: DuelState = {
@@ -1351,8 +1780,9 @@ export async function handleDuelRequest(
     createdAt: nowSec,
   };
 
-  // Expired duels are refunded by the cron sweep (src/sweep.ts);
-  // in-request setTimeout() is unreliable on Workers and not used.
+  // No escrow happens at creation — both players are debited at accept time
+  // (handleDuelAccept). Expired duels are simply deleted by the cron sweep
+  // (src/sweep.ts); in-request setTimeout() is unreliable on Workers and not used.
   await createDuel(db, duel);
 }
 
@@ -1380,7 +1810,11 @@ export async function handleDuelAccept(
     return;
   }
 
-  await deleteDuel(db, duelId);
+  const claimed = await deleteDuel(db, duelId);
+  if (!claimed) {
+    await answerCallback(token, callback.id, "🐱 این دعوا قبلاً انجام شده یا منقضی شده!", true);
+    return;
+  }
   const now = Math.floor(Date.now() / 1000);
 
   // Double-check both players actually have enough points before proceeding.
@@ -1423,13 +1857,38 @@ export async function handleDuelAccept(
       .bind(duel.amount, duel.groupId, duel.targetId, duel.amount),
   ]);
 
-  // defensive check in case concurrent change happened between select and update
+  // defensive check in case concurrent change happened between select and update.
+  // NOTE: D1 batch() only rolls back on hard errors — a statement matching zero
+  // rows (meta.changes === 0) is NOT an error, so the other deductions in this
+  // batch are already committed. Refund the ones that DID apply so no points
+  // silently vanish, keeping the accept all-or-nothing.
   if (
     batchResults[0].meta.changes === 0 ||
     batchResults[1].meta.changes === 0 ||
     batchResults[2].meta.changes === 0 ||
     batchResults[3].meta.changes === 0
   ) {
+    const refunds: Array<ReturnType<D1Database["prepare"]>> = [];
+    if (batchResults[0].meta.changes > 0) {
+      refunds.push(db.prepare(`UPDATE users SET meow_points = meow_points + ? WHERE telegram_id = ?`).bind(duel.amount, duel.challengerId));
+    }
+    if (batchResults[1].meta.changes > 0) {
+      refunds.push(db.prepare(`UPDATE users SET meow_points = meow_points + ? WHERE telegram_id = ?`).bind(duel.amount, duel.targetId));
+    }
+    if (batchResults[2].meta.changes > 0) {
+      refunds.push(
+        db.prepare(`UPDATE group_members SET meow_points = meow_points + ? WHERE telegram_group_id = ? AND telegram_user_id = ?`)
+          .bind(duel.amount, duel.groupId, duel.challengerId)
+      );
+    }
+    if (batchResults[3].meta.changes > 0) {
+      refunds.push(
+        db.prepare(`UPDATE group_members SET meow_points = meow_points + ? WHERE telegram_group_id = ? AND telegram_user_id = ?`)
+          .bind(duel.amount, duel.groupId, duel.targetId)
+      );
+    }
+    if (refunds.length) await db.batch(refunds);
+
     await editMessageText(
       token,
       duel.groupId,
@@ -1449,6 +1908,16 @@ export async function handleDuelAccept(
       db.prepare(`UPDATE users SET meow_points = meow_points + ? WHERE telegram_id = ?`).bind(duel.amount, duel.targetId),
       db.prepare(`UPDATE group_members SET meow_points = meow_points + ? WHERE telegram_group_id = ? AND telegram_user_id = ?`).bind(duel.amount, duel.groupId, duel.challengerId),
       db.prepare(`UPDATE group_members SET meow_points = meow_points + ? WHERE telegram_group_id = ? AND telegram_user_id = ?`).bind(duel.amount, duel.groupId, duel.targetId),
+      // Compensating rows so the /repair balance check (meow_points vs SUM of
+      // transactions) stays consistent — mirror the win path's DUEL_BET rows.
+      db.prepare(`INSERT INTO transactions (telegram_user_id, group_id, amount, reason, created_at) VALUES (?, ?, ?, ?, ?)`)
+        .bind(duel.challengerId, duel.groupId, -duel.amount, 'DUEL_BET', now),
+      db.prepare(`INSERT INTO transactions (telegram_user_id, group_id, amount, reason, created_at) VALUES (?, ?, ?, ?, ?)`)
+        .bind(duel.targetId, duel.groupId, -duel.amount, 'DUEL_BET', now),
+      db.prepare(`INSERT INTO transactions (telegram_user_id, group_id, amount, reason, created_at) VALUES (?, ?, ?, ?, ?)`)
+        .bind(duel.challengerId, duel.groupId, duel.amount, 'DUEL_TIE', now),
+      db.prepare(`INSERT INTO transactions (telegram_user_id, group_id, amount, reason, created_at) VALUES (?, ?, ?, ?, ?)`)
+        .bind(duel.targetId, duel.groupId, duel.amount, 'DUEL_TIE', now),
     ]);
 
     await editMessageText(
@@ -1486,6 +1955,8 @@ export async function handleDuelAccept(
       .bind(duel.targetId, duel.groupId, -duel.amount, `DUEL_BET`, now),
     db.prepare(`INSERT INTO transactions (telegram_user_id, group_id, amount, reason, created_at) VALUES (?, ?, ?, ?, ?)`)
       .bind(winnerId, duel.groupId, winnerReward, `DUEL_WIN`, now),
+    db.prepare(`INSERT INTO transactions (telegram_user_id, group_id, amount, reason, created_at) VALUES (?, ?, ?, ?, ?)`)
+      .bind(winnerId === duel.challengerId ? duel.targetId : duel.challengerId, duel.groupId, 0, `DUEL_LOSS`, now),
     db.prepare(`UPDATE group_members SET duel_rating = ? WHERE telegram_group_id = ? AND telegram_user_id = ?`).bind(newChallengerRating, duel.groupId, duel.challengerId),
     db.prepare(`UPDATE group_members SET duel_rating = ? WHERE telegram_group_id = ? AND telegram_user_id = ?`).bind(newTargetRating, duel.groupId, duel.targetId),
   ]);
@@ -1539,435 +2010,6 @@ export async function handleDuelDecline(token: string, db: D1Database, callback:
   );
 
   await answerCallback(token, callback.id, "✅ دعوا لغو شد.");
-}
-
-/**
- * Sends the Hokm board message. Tries with the WebApp "open game" button
- * first; if Telegram rejects it (web_app requires the bot's WebApp domain to
- * be registered in @BotFather, otherwise sendMessage fails with
- * BUTTON_TYPE_INVALID), falls back to a cancel button + a plain play link so
- * the game still works.
- */
-async function sendHokmBoardMessage(
-  token: string,
-  chatId: number,
-  text: string,
-  gameId: string,
-  appUrl: string
-): Promise<number> {
-  const playUrl = appUrl ? `${appUrl}/hokm.html?game=${gameId}` : "";
-  const webAppOk =
-    !!appUrl &&
-    (appUrl.startsWith("https://") ||
-      appUrl.startsWith("http://localhost") ||
-      appUrl.startsWith("http://127.0.0.1"));
-
-  if (webAppOk) {
-    const res = await sendMessage(token, chatId, text, {
-      reply_markup: hokmBoardKeyboard(gameId, appUrl),
-    });
-    if (res.result?.message_id) return res.result.message_id;
-    // WebApp button rejected (domain not registered) — fall through.
-  }
-
-  const fallbackText = playUrl
-    ? `${text}\n\n🔗 <a href="${escapeHtml(playUrl)}">باز کردن بازی</a>\n\n⚠️ اگه دکمه «بازی را باز کن» کار نکرد، دامنه WebApp ربات رو در BotFather ثبت کن (/setdomain).`
-    : text;
-  const res = await sendMessage(token, chatId, fallbackText, {
-    reply_markup: {
-      inline_keyboard: [[{ text: "❌ لغو بازی", callback_data: `hokm:cancel:${gameId}` }]],
-    },
-  });
-  return res.result?.message_id ?? 0;
-}
-
-export async function handleHokmRequest(
-  token: string,
-  db: D1Database,
-  env: Bindings,
-  message: TelegramMessage,
-  c: any
-) {
-  if (message.chat.type === "private") {
-    await sendMessage(token, message.chat.id, "🐱 حکم فقط داخل گروه بازی می‌شه!");
-    return;
-  }
-  if (!message.from) return;
-
-  const text = message.text || "";
-  const parts = text.split(" ").filter(Boolean);
-  // Practice mode: "/hokm bot" — a free game vs 3 AI bots. Bot games are
-  // unbettable: the amount is optional and always ignored (bet = 0).
-  const withBots =
-    ["bots", "bot", "ربات"].includes((parts[1] ?? "").toLowerCase()) ||
-    ["bots", "bot", "ربات"].includes((parts[2] ?? "").toLowerCase());
-
-  let bet: number;
-  if (withBots) {
-    bet = 0; // no escrow, no payout
-  } else {
-    if (parts.length < 2) {
-      await sendMessage(
-        token,
-        message.chat.id,
-        "🐱 نحوه استفاده:\n<code>/hokm 4000</code> — بازی واقعی\n<code>/hokm bot</code> — تمرین رایگان با ربات",
-        { reply_to_message_id: message.message_id }
-      );
-      return;
-    }
-    const parsed = safeParseAmount(parts[1]);
-    if (parsed === null) {
-      await sendMessage(token, message.chat.id, "🐱 مقدار امتیاز نامعتبره!", { reply_to_message_id: message.message_id });
-      return;
-    }
-    if (parsed % 4 !== 0) {
-      await sendMessage(token, message.chat.id, "🐱 مبلغ باید مضرب ۴ باشه (تا ۴ نفر سهم مساوی بدن).", {
-        reply_to_message_id: message.message_id,
-      });
-      return;
-    }
-    bet = parsed;
-  }
-  const perPlayer = bet / 4;
-
-  if (!withBots) {
-    await ensureGroup(db, message.chat);
-    await ensureUser(db, message.from);
-    const global = await db.prepare(`SELECT meow_points FROM users WHERE telegram_id = ?`).bind(message.from.id).first<{ meow_points: number }>();
-    const groupBalance = await getGroupMemberBalance(db, message.chat.id, message.from.id);
-    if (!global || global.meow_points < perPlayer || groupBalance < perPlayer) {
-      await sendMessage(token, message.chat.id, `🐱 سهم شما (${perPlayer} MP) در این گروه کافی نیست!\n💳 موجودی گروه: ${groupBalance} MP`, {
-        reply_to_message_id: message.message_id,
-      });
-      return;
-    }
-  }
-
-  const activeGame = await getActiveHokmGame(db, message.chat.id);
-  if (activeGame) {
-    await sendMessage(token, message.chat.id, "🐱 الان یک بازی حکم در همین گروه در جریانه! صبر کن تموم شه.", {
-      reply_to_message_id: message.message_id,
-    });
-    return;
-  }
-
-  const gameId = generateHokmId();
-  const nowSec = Math.floor(Date.now() / 1000);
-  const appUrl = env.HOKM_APP_URL || (c?.req?.url ? new URL(c.req.url).origin : "");
-  const lobbyTimeout = env.HOKM_LOBBY_TIMEOUT_SEC ?? HOKM_LOBBY_TIMEOUT_SEC;
-
-  let lobbyMsgId = 0;
-  if (!withBots) {
-    const res = await sendMessage(
-      token,
-      message.chat.id,
-      `♠️ <b>بازی حکم!</b>\n\n` +
-        `🐱 ${escapeHtml(message.from.first_name)} صندلی ۱ (تیم ۱)\n\n` +
-        `💰 پات: <b>${bet} MP</b>\n` +
-        `💸 سهم هر نفر: <b>${perPlayer} MP</b>\n` +
-        `👥 تیم‌ها: صندلی‌های روبه‌رو هم‌تیم هستند\n\n` +
-        `⏱️ ${lobbyTimeout} ثانیه فرصت داری ۳ نفر دیگه جذب کنی!`,
-    { reply_markup: hokmSeatKeyboard(gameId) }
-    );
-    lobbyMsgId = res.result?.message_id ?? 0;
-    if (!lobbyMsgId) {
-      await sendMessage(token, message.chat.id, "❌ ارسال پیام بازی ناموفق بود. دوباره تلاش کن!");
-      return;
-    }
-  }
-
-  const created = await createHokmGame(db, {
-    gameId,
-    groupId: message.chat.id,
-    creatorId: message.from.id,
-    bet,
-    perPlayer,
-    boardMsgId: lobbyMsgId,
-    appUrl,
-    createdAt: nowSec,
-  });
-  if (!created) {
-    if (lobbyMsgId) await deleteMessage(token, message.chat.id, lobbyMsgId);
-    await sendMessage(token, message.chat.id, "🐱 الان یک بازی حکم در همین گروه در جریانه! صبر کن تموم شه.", {
-      reply_to_message_id: message.message_id,
-    });
-    return;
-  }
-
-  if (!withBots) {
-    const escrow = await db.batch([
-      db.prepare(`UPDATE users SET meow_points = meow_points - ? WHERE telegram_id = ? AND meow_points >= ?`).bind(perPlayer, message.from.id, perPlayer),
-      db.prepare(`UPDATE group_members SET meow_points = meow_points - ? WHERE telegram_group_id = ? AND telegram_user_id = ? AND meow_points >= ?`).bind(perPlayer, message.chat.id, message.from.id, perPlayer),
-    ]);
-    const usersDeducted = escrow[0].meta.changes > 0;
-    const groupDeducted = escrow[1].meta.changes > 0;
-    if (!usersDeducted || !groupDeducted) {
-      // Reverse whatever part of the escrow succeeded so balances stay consistent.
-      const undo: D1PreparedStatement[] = [];
-      if (usersDeducted) {
-        undo.push(db.prepare(`UPDATE users SET meow_points = meow_points + ? WHERE telegram_id = ?`).bind(perPlayer, message.from.id));
-      }
-      if (groupDeducted) {
-        undo.push(db.prepare(`UPDATE group_members SET meow_points = meow_points + ? WHERE telegram_group_id = ? AND telegram_user_id = ?`).bind(perPlayer, message.chat.id, message.from.id));
-      }
-      if (undo.length) await db.batch(undo);
-      await cancelHokmGame(db, gameId);
-      if (lobbyMsgId) await deleteMessage(token, message.chat.id, lobbyMsgId);
-      await sendMessage(token, message.chat.id, "🐱 امتیاز کافی برای شروع بازی نداشتی!");
-      return;
-    }
-
-    const added = await addHokmPlayer(db, gameId, {
-      userId: message.from.id,
-      username: message.from.username ?? null,
-      firstName: message.from.first_name,
-      seat: 0,
-      acceptedAt: nowSec,
-    });
-    if (!added) {
-      await refundHokmEscrow(db, message.chat.id, message.from.id, perPlayer);
-      await cancelHokmGame(db, gameId);
-      if (lobbyMsgId) await deleteMessage(token, message.chat.id, lobbyMsgId);
-      return;
-    }
-
-    await db
-      .prepare(`INSERT INTO transactions (telegram_user_id, group_id, amount, reason, created_at) VALUES (?, ?, ?, ?, ?)`)
-      .bind(message.from.id, message.chat.id, -perPlayer, `HOKM_BET`, nowSec)
-      .run();
-
-    // Lobby expiry is handled by the cron sweep (src/sweep.ts) — the reliable
-    // backstop. In-request setTimeout() is unreliable on Workers and is not used.
-    return;
-  }
-
-  // ---- Practice mode (free): the human also pays 0 — no money at all ----
-  const added = await addHokmPlayer(db, gameId, {
-    userId: message.from.id,
-    username: message.from.username ?? null,
-    firstName: message.from.first_name,
-    seat: 0,
-    acceptedAt: nowSec,
-    paid: 0,
-  });
-  if (!added) {
-    await cancelHokmGame(db, gameId);
-    if (lobbyMsgId) await deleteMessage(token, message.chat.id, lobbyMsgId);
-    return;
-  }
-
-  // Fill seats 1-3 with AI bots (paid=0, no escrow).
-  for (let seat = 1; seat <= 3; seat++) {
-    await addHokmPlayer(db, gameId, {
-      userId: hokmBotUserId(seat),
-      username: null,
-      firstName: `🤖 ربات ${seat}`,
-      seat,
-      acceptedAt: nowSec,
-      paid: 0,
-    });
-  }
-
-  const started = await setHokmGamePlaying(db, gameId, nowSec);
-  const allPlayers = await getHokmPlayers(db, gameId);
-  const lines = allPlayers.map((p) => `🪑 صندلی ${p.seat + 1}: ${escapeHtml(p.first_name)}`).join("\n");
-
-  if (!started) {
-    await removeHokmPlayer(db, gameId, message.from.id);
-    await cancelHokmGame(db, gameId);
-    if (lobbyMsgId) await deleteMessage(token, message.chat.id, lobbyMsgId);
-    return;
-  }
-
-  const boardMsgId = await sendHokmBoardMessage(
-    token,
-    message.chat.id,
-    `🎴 <b>بازی حکم — تمرینی با ربات!</b>\n\n` +
-      `${lines}\n\n` +
-      `💰 این بازی رایگانه — بدون شرطبندی!\n` +
-      `🤖 ۳ ربات به بازی اضافه شدن.\n` +
-      `⬇️ دکمه بازی رو بزن تا وارد بشی!`,
-    gameId,
-    appUrl
-  );
-  if (!boardMsgId) {
-    await cancelHokmGame(db, gameId);
-    if (lobbyMsgId) await deleteMessage(token, message.chat.id, lobbyMsgId);
-    await sendMessage(token, message.chat.id, "❌ ارسال پیام شروع ناموفق بود.");
-    return;
-  }
-
-  await setHokmGameBoardMsg(db, gameId, boardMsgId);
-  if (lobbyMsgId) await deleteMessage(token, message.chat.id, lobbyMsgId);
-
-  try {
-    const stub = env.HOKM_GAME.get(env.HOKM_GAME.idFromName(gameId));
-    await stub.fetch(`http://hokm/init`, {
-      method: "POST",
-      headers: { "X-Hokm-App-Url": appUrl, "X-Hokm-Game-Id": gameId },
-    });
-  } catch (e) {
-    console.error("HokmGame init error:", e);
-  }
-}
-
-export async function handleHokmAccept(
-  token: string,
-  db: D1Database,
-  env: Bindings,
-  callback: TelegramCallbackQuery,
-  gameId: string,
-  seat: number
-) {
-  if (!callback.message) return;
-
-  if (!isValidHokmGameId(gameId)) {
-    await answerCallback(token, callback.id, "🐱 بازی نامعتبر!", true);
-    return;
-  }
-  if (seat < 1 || seat > 3) {
-    await answerCallback(token, callback.id, "🐱 صندلی نامعتبر!", true);
-    return;
-  }
-
-  const game = await getHokmGame(db, gameId);
-  if (!game || game.status !== "lobby" || game.board_msg_id !== callback.message.message_id) {
-    await answerCallback(token, callback.id, "🐱 این بازی دیگه قابل قبول نیست!", true);
-    return;
-  }
-
-  if (game.creator_id === callback.from.id) {
-    await answerCallback(token, callback.id, "🐱 تو سازنده بازی هستی!", true);
-    return;
-  }
-
-  const players = await getHokmPlayers(db, gameId);
-  if (players.some((p) => p.telegram_user_id === callback.from.id)) {
-    await answerCallback(token, callback.id, "🐱 قبلاً وارد بازی شدی!", true);
-    return;
-  }
-  if (players.some((p) => p.seat === seat)) {
-    await answerCallback(token, callback.id, "🐱 این صندلی گرفته شده!", true);
-    return;
-  }
-
-  await ensureUser(db, callback.from);
-  const global = await db.prepare(`SELECT meow_points FROM users WHERE telegram_id = ?`).bind(callback.from.id).first<{ meow_points: number }>();
-  const groupBalance = await getGroupMemberBalance(db, game.group_id, callback.from.id);
-  if (!global || global.meow_points < game.per_player || groupBalance < game.per_player) {
-    await answerCallback(token, callback.id, `🐱 سهم شما (${game.per_player} MP) در این گروه کافی نیست!`, true);
-    return;
-  }
-
-  const nowSec = Math.floor(Date.now() / 1000);
-  const escrow = await db.batch([
-    db.prepare(`UPDATE users SET meow_points = meow_points - ? WHERE telegram_id = ? AND meow_points >= ?`).bind(game.per_player, callback.from.id, game.per_player),
-    db.prepare(`UPDATE group_members SET meow_points = meow_points - ? WHERE telegram_group_id = ? AND telegram_user_id = ? AND meow_points >= ?`).bind(game.per_player, game.group_id, callback.from.id, game.per_player),
-  ]);
-  const usersDeducted = escrow[0].meta.changes > 0;
-  const groupDeducted = escrow[1].meta.changes > 0;
-  if (!usersDeducted || !groupDeducted) {
-    // Reverse whatever part of the escrow succeeded so balances stay consistent.
-    const undo: D1PreparedStatement[] = [];
-    if (usersDeducted) {
-      undo.push(db.prepare(`UPDATE users SET meow_points = meow_points + ? WHERE telegram_id = ?`).bind(game.per_player, callback.from.id));
-    }
-    if (groupDeducted) {
-      undo.push(db.prepare(`UPDATE group_members SET meow_points = meow_points + ? WHERE telegram_group_id = ? AND telegram_user_id = ?`).bind(game.per_player, game.group_id, callback.from.id));
-    }
-    if (undo.length) await db.batch(undo);
-    await answerCallback(token, callback.id, "🐱 امتیاز کافی نداری!", true);
-    return;
-  }
-
-  // Reserve the seat atomically — concurrent taps cannot both win the same seat.
-  const added = await addHokmPlayer(db, gameId, {
-    userId: callback.from.id,
-    username: callback.from.username ?? null,
-    firstName: callback.from.first_name,
-    seat,
-    acceptedAt: nowSec,
-  });
-  if (!added) {
-    await refundHokmEscrow(db, game.group_id, callback.from.id, game.per_player);
-    await answerCallback(token, callback.id, "🐱 این صندلی گرفته شده یا بازی شروع شده!", true);
-    return;
-  }
-
-  await db
-    .prepare(`INSERT INTO transactions (telegram_user_id, group_id, amount, reason, created_at) VALUES (?, ?, ?, ?, ?)`)
-    .bind(callback.from.id, game.group_id, -game.per_player, `HOKM_BET`, nowSec)
-    .run();
-
-  const allPlayers = await getHokmPlayers(db, gameId);
-  const newCount = allPlayers.length;
-  const lines = allPlayers.map((p) => `🪑 صندلی ${p.seat + 1}: ${escapeHtml(p.first_name)}`).join("\n");
-
-  if (newCount < 4) {
-    await editMessageText(
-      token,
-      game.group_id,
-      game.board_msg_id!,
-      `♠️ <b>بازی حکم!</b>\n\n${lines}\n\n` +
-        `💰 پات: <b>${game.bet} MP</b> (هر نفر ${game.per_player})\n` +
-        `👥 تیم‌ها: صندلی‌های روبه‌رو هم‌تیم هستند\n\n` +
-        `⏳ ${4 - newCount} نفر دیگه لازمه!`
-    );
-    await answerCallback(token, callback.id, "✅ وارد بازی شدی!");
-    return;
-  }
-
-  // Flip the game to 'playing' atomically — a concurrent 4th joiner may have
-  // already done so; only the winner of the race runs the start flow.
-  const started = await setHokmGamePlaying(db, gameId, nowSec);
-  if (!started) {
-    // Defensive: another concurrent joiner already started the match. Undo our
-    // own escrow and seat reservation so no money or player row is leaked.
-    await removeHokmPlayer(db, gameId, callback.from.id);
-    await refundHokmEscrow(db, game.group_id, callback.from.id, game.per_player);
-    if (game.board_msg_id) {
-      await deleteMessage(token, game.group_id, game.board_msg_id);
-    }
-    await answerCallback(token, callback.id, "🎉 بازی شروع شد!");
-    return;
-  }
-
-  const baseUrl = game.app_url || env.HOKM_APP_URL || "";
-  const boardMsgId = await sendHokmBoardMessage(
-    token,
-    game.group_id,
-    `🎴 <b>بازی حکم شروع شد!</b>\n\n${lines}\n\n` +
-      `💰 پات: <b>${game.bet} MP</b>\n` +
-      `🏆 برنده تیم: ${game.bet} MP\n\n` +
-      `⬇️ دکمه بازی رو بزن تا وارد بشی!`,
-    gameId,
-    baseUrl
-  );
-  if (!boardMsgId) {
-    await cancelHokmGame(db, gameId);
-    if (game.board_msg_id) {
-      await deleteMessage(token, game.group_id, game.board_msg_id);
-    }
-    await answerCallback(token, callback.id, "❌ ارسال پیام شروع ناموفق بود؛ مبلغ‌ها برگشت.", true);
-    return;
-  }
-
-  await setHokmGameBoardMsg(db, gameId, boardMsgId);
-  if (game.board_msg_id) {
-    await deleteMessage(token, game.group_id, game.board_msg_id);
-  }
-
-  try {
-    const stub = env.HOKM_GAME.get(env.HOKM_GAME.idFromName(gameId));
-    await stub.fetch(`http://hokm/init`, {
-      method: "POST",
-      headers: { "X-Hokm-App-Url": baseUrl, "X-Hokm-Game-Id": gameId },
-    });
-  } catch (e) {
-    console.error("HokmGame init error:", e);
-  }
-
-  await answerCallback(token, callback.id, "🎉 بازی کامل شد!");
 }
 
 export async function handleGroupSettings(token: string, db: D1Database, message: TelegramMessage) {
@@ -2062,23 +2104,19 @@ export async function handleCallbackQuery(
 
       if (params[0] === "me") await handleMe(token, db, env, fakeMessage);
       else if (params[0] === "top") await handleTop(token, db, fakeMessage);
-      else if (params[0] === "global") await handleGlobal(token, db, fakeMessage);
-      else if (params[0] === "daily") await handleDaily(token, db, fakeMessage);
       else if (params[0] === "history") await handleHistory(token, db, fakeMessage);
       else if (params[0] === "events") await handleEvents(token, db, env, fakeMessage);
       else if (params[0] === "pay") await handlePay(token, db, fakeMessage);
       else if (params[0] === "treasury") await handleTreasury(token, db, fakeMessage);
-      else if (params[0] === "clan") await handleClan(token, db, fakeMessage);
       else if (params[0] === "dice") await handleDice(token, db, env, fakeMessage);
       else if (params[0] === "lottery" || params[0] === "gamble") await handleLottery(token, db, env, fakeMessage);
       else if (params[0] === "duelrank") await handleDuelRank(token, db, fakeMessage);
+      else if (params[0] === "poker") await handlePokerCommand(token, db, env, fakeMessage);
+      else if (params[0] === "blackjack") await handleBlackjackCommand(token, db, env, fakeMessage);
+      else if (params[0] === "booster") await handleBooster(token, db, fakeMessage);
+      else if (params[0] === "groupstats") await handleGroupStats(token, db, fakeMessage);
 
       await answerCallback(token, callback.id);
-      return;
-    }
-
-    if (action === "daily") {
-      await answerCallback(token, callback.id, "❌ درخواست نامعتبر", true);
       return;
     }
 
@@ -2090,7 +2128,7 @@ export async function handleCallbackQuery(
           token,
           chatId,
           messageId,
-          `🆘 <b>راهنمای سریع</b>\n\n• برای امتیاز گرفتن، در گروه <b>میو</b> بگو\n• برای دیدن وضعیت خود، /me را بفرست\n• برای جایزه روزانه، /daily را بفرست\n• برای انتقال امتیاز، /pay @username 100\n• برای دیدن رتبه‌بندی، /top را بفرست`, 
+          `🆘 <b>راهنمای سریع</b>\n\n• برای امتیاز گرفتن، در گروه <b>میو</b> بگو\n• برای دیدن وضعیت خود، /me را بفرست\n• برای انتقال امتیاز، /pay یا انتقال @username 100\n• برای دیدن رتبه‌بندی، /top را بفرست`,
           mainMenuKeyboard(userId)
         );
       } else if (params[0] === "group_settings") {
@@ -2153,20 +2191,35 @@ export async function handleCallbackQuery(
     if (action === "duel") {
       if (params[0] === "accept") {
         await handleDuelAccept(token, db, callback, params[1]);
-      } else if (params[0] === "decline") {
+      } else if (params[0] === "decline" || params[0] === "cancel") {
+        // decline is target-scoped, cancel is challenger-scoped (see
+        // duelKeyboard); handleDuelDecline accepts either player.
         await handleDuelDecline(token, db, callback, params[1]);
       }
       return;
     }
 
-    if (action === "hokm" && params[0] === "seat" && params[1] && params[2]) {
-      await handleHokmAccept(token, db, env, callback, params[1], parseInt(params[2], 10));
+    if (action === "booster") {
+      if (params[0] !== "buy") {
+        await answerCallback(token, callback.id, "❌ درخواست نامعتبر", true);
+        return;
+      }
+      await handleBoosterBuy(token, db, callback, params[1] ?? "");
       return;
     }
 
-    if (action === "hokm" && params[0] === "cancel" && params[1]) {
-      const res = await cancelActiveHokmGame(token, db, env, chatId, userId);
-      await answerCallback(token, callback.id, res.message, !res.ok);
+    if (action === "poker") {
+      await handlePokerCallback(token, db, env, callback);
+      return;
+    }
+
+    if (action === "bj") {
+      await handleBlackjackCallback(token, db, env, callback);
+      return;
+    }
+
+    if (action === "title") {
+      await handleTitleCallback(token, db, env, callback);
       return;
     }
 
@@ -2190,6 +2243,9 @@ export async function handleCallbackQuery(
 
       if (params[0] === "end") {
         await db.prepare(`UPDATE events SET is_active = 0 WHERE is_active = 1`).run();
+        // Flush the cached active event so meows stop applying its multiplier
+        // immediately (same as handleDeleteEvent) instead of up to the TTL.
+        await invalidateActiveEventCache(env);
         await editMessageText(token, chatId, messageId, "✅ رویداد فعلی پایان پیدا کرد.");
         await answerCallback(token, callback.id, "رویداد پایان یافت.", true);
         return;
@@ -2202,17 +2258,18 @@ export async function handleCallbackQuery(
         await answerCallback(token, callback.id, "🚫 این دکمه فقط برای کسی است که پیام را باز کرده است.", true);
         return;
       }
+      const canDraw = env.BOT_OWNER_ID === String(userId) || await isGroupAdmin(token, chatId, userId);
 
       if (lotteryParams[0] === "status") {
         const text = await getLotteryStatusText(db, chatId, userId);
-        await editMessageText(token, chatId, messageId, text, lotteryKeyboard(env.BOT_OWNER_ID === String(userId), userId));
+        await editMessageText(token, chatId, messageId, text, lotteryKeyboard(env.BOT_OWNER_ID === String(userId), userId, canDraw));
         await answerCallback(token, callback.id);
         return;
       }
 
       if (lotteryParams[0] === "my_tickets") {
         const text = await getLotteryTicketSummary(db, chatId, userId);
-        await editMessageText(token, chatId, messageId, text, lotteryKeyboard(env.BOT_OWNER_ID === String(userId), userId));
+        await editMessageText(token, chatId, messageId, text, lotteryKeyboard(env.BOT_OWNER_ID === String(userId), userId, canDraw));
         await answerCallback(token, callback.id);
         return;
       }
@@ -2220,7 +2277,7 @@ export async function handleCallbackQuery(
       if (lotteryParams[0] === "help") {
         const settings = await getGroupLotteryConfig(db, chatId);
         const isOwner = env.BOT_OWNER_ID === String(userId);
-        await editMessageText(token, chatId, messageId, formatLotteryHelpText(settings), lotteryKeyboard(isOwner, userId));
+        await editMessageText(token, chatId, messageId, formatLotteryHelpText(settings), lotteryKeyboard(isOwner, userId, canDraw));
         await answerCallback(token, callback.id);
         return;
       }
@@ -2250,21 +2307,22 @@ export async function handleCallbackQuery(
           return;
         }
         const numbersText = purchase.numbers?.map((nums, index) => `🎫 بلیت ${index + 1}: ${nums.split(',').join(', ')}`).join('\n') ?? "-";
+        const freeText = purchase.allocated > 0 ? `\n\n🎁 <b>${purchase.allocated}</b> بلیت رایگان شما هم در این دور ثبت شد.` : "";
         await editMessageText(token, chatId, messageId,
           `🎫 <b>بلیت خریداری شد</b>\n\n` +
           `تعداد بلیت: <b>${count}</b>\n` +
           `شماره دور: <b>${purchase.roundId}</b>\n\n` +
-          `📌 شماره‌های بلیت‌های شما:\n${numbersText}\n\n` +
+          `📌 شماره‌های بلیت‌های شما:\n${numbersText}${freeText}\n\n` +
           `🎯 اگر حداقل 3 عدد با اعداد برنده یکی باشد، در این دور برنده می‌شوید.\n` +
           `💡 ساختار جوایز: 3 عدد = 20% پات، 4 عدد = 35%، 5 عدد = 50%، 6 عدد = 100%`,
-          lotteryKeyboard(env.BOT_OWNER_ID === String(userId), callback.from.id)
+          lotteryKeyboard(env.BOT_OWNER_ID === String(userId), callback.from.id, canDraw)
         );
 
         await answerCallback(token, callback.id);
         return;
       }
 
-      if (params[0] === "draw") {
+      if (lotteryParams[0] === "draw") {
         if (env.BOT_OWNER_ID !== String(userId)) {
           const isAdmin = await isGroupAdmin(token, chatId, userId);
           if (!isAdmin) {
@@ -2279,7 +2337,10 @@ export async function handleCallbackQuery(
           return;
         }
 
-        const drawRes = await drawLotteryRound(db, round.id, chatId, callback.from?.id ?? null);
+        // Make sure pending free tickets (earned by meowing) join this round before the draw.
+        await allocatePendingLotteryTickets(db, chatId);
+
+        const drawRes = await drawLotteryRound(db, round.id, chatId);
         if (!drawRes.success) {
           await answerCallback(token, callback.id, `❌ خطا در قرعه‌کشی: ${String(drawRes.reason)}`, true);
           return;
@@ -2299,7 +2360,7 @@ export async function handleCallbackQuery(
           `💸 مجموع پرداختی: <b>${drawRes.totalPaid} MP</b>\n` +
           `👥 تعداد برندگان: <b>${drawRes.payoutsCount}</b>\n` +
           `✨ نتایج در پیام جدید ارسال شد.`,
-          lotteryKeyboard(env.BOT_OWNER_ID === String(userId), userId)
+          lotteryKeyboard(env.BOT_OWNER_ID === String(userId), userId, canDraw)
         );
 
         await sendMessage(token, chatId,
@@ -2310,11 +2371,26 @@ export async function handleCallbackQuery(
           { parse_mode: "HTML" }
         );
 
+        // Notify each winning user privately when they have opted in. A user
+        // may win with multiple tickets, so send at most one DM per draw.
+        const notifiedUsers = new Set<number>();
+        for (const winner of winners) {
+          if (winner.payout <= 0 || notifiedUsers.has(winner.userId)) continue;
+          notifiedUsers.add(winner.userId);
+          if (await getNotificationsEnabled(db, winner.userId)) {
+            await sendMessage(
+              token,
+              winner.userId,
+              `🎉 <b>برد لاتاری!</b>\n\nدر گروه <b>${escapeHtml(String(chatId))}</b>، ${winner.matchCount} عدد درست داشتی و <b>${winner.payout} MP</b> بردی.`,
+            );
+          }
+        }
+
         await answerCallback(token, callback.id, "✅ قرعه‌کشی انجام شد.");
         return;
       }
 
-      if (params[0] === "adjust_price") {
+      if (lotteryParams[0] === "adjust_price") {
         if (env.BOT_OWNER_ID !== String(userId)) {
           await answerCallback(token, callback.id, "🚫 فقط صاحب ربات!", true);
           return;
@@ -2328,7 +2404,7 @@ export async function handleCallbackQuery(
         return;
       }
 
-      if (params[0] === "adjust_pot") {
+      if (lotteryParams[0] === "adjust_pot") {
         if (env.BOT_OWNER_ID !== String(userId)) {
           await answerCallback(token, callback.id, "🚫 فقط صاحب ربات!", true);
           return;
@@ -2345,46 +2421,6 @@ export async function handleCallbackQuery(
     await answerCallback(token, callback.id, "❌ درخواست نامعتبر", true);
     return;
   }
-
-    if (action === "clan") {
-      if (!callback.from || !callback.message) {
-        await answerCallback(token, callback.id, "❌ درخواست نامعتبر", true);
-        return;
-      }
-      const sub = params[0];
-
-      if (sub === "status") {
-        const clan = await getUserClan(db, chatId, userId);
-        const text = clan
-          ? `👥 <b>قبیله ${escapeHtml(clan.name)}</b>\n👑 مالک: <code>${clan.owner_user_id}</code>\n💰 خزانه: <b>${clan.treasury_balance} MP</b>`
-          : "👥 شما هنوز قبیله‌ای ندارید.";
-        await editMessageText(token, chatId, messageId, text, clanKeyboard(!!clan, userId));
-      } else if (sub === "create") {
-        await sendMessage(token, chatId, `برای ایجاد قبیله از دستور زیر استفاده کن:\n<code>/clan create نام_قبیله</code>`);
-      } else if (sub === "join") {
-        await sendMessage(token, chatId, `برای پیوستن به قبیله از دستور زیر استفاده کن:\n<code>/clan join نام_قبیله</code>`);
-      } else if (sub === "leave") {
-        const clan = await getUserClan(db, chatId, userId);
-        if (!clan) {
-          await answerCallback(token, callback.id, "👥 شما قبیله‌ای ندارید!", true);
-          return;
-        }
-        const left = await leaveClan(db, clan.clan_id, userId);
-        await editMessageText(
-          token,
-          chatId,
-          messageId,
-          left ? "🚪 شما از قبیله خارج شدید." : "❌ خارج شدن از قبیله ممکن نشد.",
-          clanKeyboard(false, userId)
-        );
-      } else {
-        await answerCallback(token, callback.id, "❌ درخواست نامعتبر", true);
-        return;
-      }
-
-      await answerCallback(token, callback.id);
-      return;
-    }
 
   await answerCallback(token, callback.id);
   } catch (err) {
@@ -2411,8 +2447,6 @@ export async function handleMyChatMember(token: string, db: D1Database, update: 
           `📌 <b>دستورات:</b>\n` +
           `/me — پروفایل من\n` +
           `/top — رتبه‌بندی گروه\n` +
-          `/global — رتبه‌بندی جهانی\n` +
-          `/daily — جایزه روزانه\n` +
           `/pay — انتقال امتیاز\n` +
           `/settings — تنظیمات گروه (ادمین)\n\n` +
           `⏱️ کول‌داون: <b>5 دقیقه</b>\n` +

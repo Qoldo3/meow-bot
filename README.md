@@ -1,17 +1,17 @@
 # Meow Bot 🐱
 
-A Telegram points/gamification bot running on **Cloudflare Workers** (Hono + D1 + Durable Objects). Users earn "Meow Points" by typing *میو / meow* in groups, and can play lottery, dice, duels (ELO rated), clans, treasury and a full 2v2 **Hokm (حکم)** card game with a WebApp frontend.
+A Telegram points/gamification bot running on **Cloudflare Workers** (Hono + D1). Users earn "Meow Points" by typing *میو / meow* in groups, and can play lottery, dice, duels (ELO rated), treasury and more.
 
 ## Features
 
-- 💬 Meow earning with cooldowns, tiers (normal → rainbow → epic → king → diamond) and rank-based tax
-- 🏆 Group & global leaderboards, daily streak rewards, `/me` profile, `/history`
+- 💬 Meow earning with cooldowns, 12 reward tiers and rank-based tax
+- 🏆 Group leaderboard, `/me` profile, `/history`
 - 🎰 Lottery (6-of-49, per-ticket numbers, tiered payouts, admin draws), 🎲 dice, 💸 `/pay` transfers
+- 🏅 Title auctions — per-group titles won via owner-run auctions, displayed in `/top`
 - ⚔️ Duels with ELO ratings (D1-persisted so they survive restarts)
-- 🏦 Group treasury + tax pools, 👥 clans
+- 🏦 Group treasury + tax pools
 - 🎉 Configurable bonus events (`/add event Name Multiplier Minutes`)
-- ♠️ **Hokm 2v2**: Telegram lobby → WebApp (WebSocket) → Durable Object game engine with alarms for turn/trump/draw timeouts; free practice mode vs AI bots (`/hokm bot`, no money involved)
-- 🔒 Owner panel (`/admin`) with broadcast, user management, DB repair, audit, and `/hokmcancel` to cancel an active Hokm game (refunds everyone)
+- 🔒 Owner panel (`/admin`) with broadcast, user management, DB repair, and audit
 
 ## Commands
 
@@ -19,50 +19,46 @@ A Telegram points/gamification bot running on **Cloudflare Workers** (Hono + D1 
 
 - `/start` — welcome message + main menu
 - `/me` — your profile (points, meows, duel rating, ranks, badge)
-- `/top` — group leaderboard · `/global` — global leaderboard · `/duelrank` — duel ELO leaderboard
-- `/daily` — daily reward (private chat only, 500 MP + streak)
+- `/top` — group leaderboard · `/duelrank` — duel ELO leaderboard
 - `/pay` — transfer points: `/pay @user 100` or reply to a message with `/pay 100`
 - `/history` — your last transactions
 - `/lottery` / `/gamble` / `قمار` — lottery status; `/lottery buy 3` to buy tickets
 - `/dice` / `تاس` — roll the dice (doubles win big)
 - `/treasury` — group treasury balance
-- `/clan` / `/clans` — your clan; `/clan create Name`, `/clan join Name`
+- `تایتل` — your titles; `<تایتل 3>` — set the active `/top` title; `<تایتل نام>` — suggest a title
 - `/settings` — group settings · `/events` — active bonus events
 - `دعوا 500` (reply to someone) — challenge them to a duel (both stake the amount, ELO rated)
-- `/hokm 4000` — start a real 2v2 Hokm game (pot 4000 → 1000 per player)
-- `/hokm bot` — free practice game vs 3 AI bots (no betting)
 - `میو` / `meow` — earn random Meow Points (respects cooldown)
 
 **Owner only** (`BOT_OWNER_ID`): `/admin` panel, `/broadcast`, `/addpoints`, `/removepoints`,
 `/resetuser`, `/userinfo`, `/banuser`, `/unbanuser`, `/repair`, `/refreshbadge`,
-`/config`, `/groups`, `/duels`, `/audit`, `/hokmcancel`, and events
+`/config`, `/groups`, `/duels`, `/audit`, and events.
+Title auctions: `<تایتل نام 1000 100>` starts an auction (entry fee + jump); reply to a
+user's message with `<تایتل نام>` assigns a title directly; the 🏁 button ends an auction.
+Money flows to the lottery pot; re-auctioning an owned title pays the seller 20% of entry
+fees + (winning bid − entry).
 (`/add event Name Multiplier Minutes`, `/edit event …`, `/delete event`).
 
 ## Stack
 
 - [Cloudflare Workers](https://developers.cloudflare.com/workers/) + [Hono](https://hono.dev/)
 - **D1** (SQLite) — persistence
-- **Durable Objects** — Hokm game state + alarms
 - **KV** *(optional)* — 30s active-event cache (`CACHE` binding, not configured by default)
-- **Cron trigger** — reliable every-minute sweep for expired duels / Hokm lobbies
+- **Cron trigger** — reliable every-minute sweep for expired duels
 
 ## Project layout
 
 ```
 src/
-  app.ts          Hono router: webhook, health, Hokm WebSocket upgrade
+  app.ts          Hono router: webhook + health
   handlers.ts     All Telegram command & callback handlers
-  database.ts     D1 access layer (users, groups, lottery, clans, treasury…)
+  database.ts     D1 access layer (users, groups, lottery, treasury…)
   duel.ts         Duels + ELO
-  hokm.ts         Pure card-game logic (shuffle, tricks, scoring)
-  hokmAuth.ts     Telegram Mini App initData validation (HMAC-SHA256)
-  hokmLobby.ts    Hokm lobby persistence (D1)
-  hokmGame.ts     Durable Object: live game engine + WebSockets + alarms
   owner.ts        Owner/admin panel
   keyboards.ts    Inline keyboards
-  sweep.ts        Scheduled cleanup for expired duels & lobbies
-public/           Hokm WebApp (hokm.html, app.js, style.css)
-migrations/       D1 migrations (0000 → 0009)
+  titleAuction.ts Per-group title auctions (commands, bidding, settlement)
+  sweep.ts        Scheduled cleanup for expired duels
+migrations/       D1 migrations (0000 → 0018)
 test/             Vitest suite (Workers pool)
 ```
 
@@ -72,7 +68,7 @@ test/             Vitest suite (Workers pool)
 npm install
 cp .dev.vars.example .dev.vars   # fill in TELEGRAM_BOT_TOKEN, BOT_OWNER_ID, WEBHOOK_SECRET
 npx wrangler d1 migrations apply meow-bot-db --local   # apply D1 migrations locally
-npm run dev                       # starts wrangler dev (also serves public/)
+npm run dev                       # starts wrangler dev
 npm test                          # vitest (Workers pool)
 npm run cf-typegen                # regenerate worker-configuration.d.ts
 ```
@@ -97,33 +93,18 @@ npm run deploy
 node scripts/set-webhook.mjs <BOT_TOKEN> https://meow-bot.<subdomain>.workers.dev/telegram/webhook <WEBHOOK_SECRET>
 ```
 
-### Hokm WebApp URL
-
-The Hokm "open game" button needs the public URL of the worker. It is derived
-automatically from the request origin at game creation; you can also set it
-explicitly:
-
-> ⚠️ For the "بازی را باز کن" WebApp button to work, register the worker
-> domain in @BotFather (`/setdomain`) — otherwise Telegram rejects the button
-> with `BUTTON_TYPE_INVALID`. The bot then falls back to a plain play link +
-> cancel button, so games still start.
-
-```jsonc
-// wrangler.jsonc
-"vars": { "HOKM_APP_URL": "https://meow-bot.<subdomain>.workers.dev" }
-```
-
 ### Optional: KV cache & VIP user
 
 - **KV cache**: create a KV namespace and uncomment `kv_namespaces` in `wrangler.jsonc`.
-- **VIP user**: set `MEOW_VIP_USER_ID` var to a numeric Telegram id to give that user boosted meow tier chances (leave empty to disable).
+- **VIP user**: set `MEOW_VIP_USER_ID` var to a numeric Telegram id to give that user boosted meow tier chances silently (renormalized odds: the bottom tier nearly disappears and higher tiers get ~2–3×) — no visible badge or indicator (leave empty to disable).
 
 ## Operational notes
 
-- **Expiry reliability**: duels and Hokm lobbies are refunded by a cron-triggered
-  sweep (`src/sweep.ts`, every minute). In-request `setTimeout()` is unreliable
-  on Workers (isolates get evicted), so it is deliberately not used.
-- **One active Hokm game per group** is enforced when creating a lobby.
+- **Expiry reliability**: expired duels are cleaned up by a cron-triggered
+  sweep (`src/sweep.ts`, every minute). No points are escrowed at duel creation
+  (both players are debited at accept), so the sweep only removes stale rows.
+  In-request `setTimeout()` is unreliable on Workers (isolates get evicted), so
+  it is deliberately not used.
 - The webhook endpoint requires `X-Telegram-Bot-Api-Secret-Token` == `WEBHOOK_SECRET`.
 - `.dev.vars`, `.wrangler`, `dist` and `node_modules` are gitignored.
 
@@ -133,5 +114,4 @@ explicitly:
 npm test
 ```
 
-Covers the Hokm engine, initData auth, lobby persistence (incl. AI bot
-practice seats), lottery, pay transfers, treasury and group balance flows.
+Covers duels, lottery, pay transfers, treasury, Poker, Blackjack, title auctions and group-balance flows.

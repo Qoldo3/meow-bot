@@ -165,3 +165,6 @@ dist
 .env*
 !.env.example
 .wrangler/
+
+# deploy notification bookkeeping (last notified commit)
+.last-deploy-commit

@@ -1,41 +1,21 @@
 import { describe, expect, it, vi, afterEach } from "vitest";
-import { sweepExpiredDuels, sweepExpiredHokmLobbies } from "../src/sweep";
+import { sweepExpiredDuels } from "../src/sweep";
 
 interface Stmt {
   sql: string;
   bindArgs: unknown[];
 }
 
-function makeDb(overrides: { duels?: unknown[]; lobbies?: unknown[]; game?: unknown } = {}) {
+function makeDb(overrides: { duels?: unknown[] } = {}) {
   const duels = overrides.duels ?? [];
-  const lobbies = overrides.lobbies ?? [];
-  const game = overrides.game ?? {
-    game_id: "g1",
-    group_id: 10,
-    creator_id: 100,
-    bet: 4000,
-    per_player: 1000,
-    status: "lobby",
-    board_msg_id: 1,
-    winner_team: null,
-    result: null,
-    created_at: 1,
-    started_at: null,
-    ended_at: null,
-  };
   const statements: Stmt[] = [];
 
   const db = {
     prepare: (sql: string) => ({
       bind: (...args: unknown[]) => {
         const stmt = { sql, bindArgs: args } as Stmt & Record<string, unknown>;
-        stmt.first = async () => {
-          if (sql.includes("FROM hokm_games")) return game;
-          return null;
-        };
         stmt.all = async () => {
           if (sql.includes("FROM active_duels")) return { results: duels };
-          if (sql.includes("FROM hokm_games")) return { results: lobbies };
           return { results: [] };
         };
         stmt.run = async () => {
@@ -83,28 +63,6 @@ describe("sweepExpiredDuels", () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ ok: true }))));
     const { db, statements } = makeDb();
     expect(await sweepExpiredDuels(db, "token")).toBe(0);
-    expect(statements).toHaveLength(0);
-  });
-});
-
-describe("sweepExpiredHokmLobbies", () => {
-  afterEach(() => vi.unstubAllGlobals());
-
-  it("cancels expired lobby games and refunds players", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ ok: true }))));
-    const { db, statements } = makeDb({
-      lobbies: [{ game_id: "g1", group_id: 10, board_msg_id: 1 }],
-    });
-
-    const cancelled = await sweepExpiredHokmLobbies(db, "token");
-    expect(cancelled).toBe(1);
-    expect(statements.some((s) => s.sql.includes("UPDATE hokm_games SET status = 'cancelled'"))).toBe(true);
-  });
-
-  it("does nothing when no lobby is expired", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ ok: true }))));
-    const { db, statements } = makeDb();
-    expect(await sweepExpiredHokmLobbies(db, "token")).toBe(0);
     expect(statements).toHaveLength(0);
   });
 });

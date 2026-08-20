@@ -1,5 +1,5 @@
 -- ============================================
--- Consolidated schema (source of truth: migrations/0000..0009)
+-- Consolidated schema (source of truth: migrations/0000..0007 + 0010..0018)
 -- ============================================
 
 -- ============================================
@@ -11,12 +11,11 @@ CREATE TABLE IF NOT EXISTS users (
     first_name TEXT NOT NULL,
     meow_points INTEGER NOT NULL DEFAULT 0,
     total_meows INTEGER NOT NULL DEFAULT 0,
-    daily_streak INTEGER NOT NULL DEFAULT 0,
-    last_daily_at INTEGER,
     last_meow_at INTEGER,
     created_at INTEGER NOT NULL,
     is_banned INTEGER DEFAULT 0,
-    duel_rating INTEGER NOT NULL DEFAULT 1000
+    duel_rating INTEGER NOT NULL DEFAULT 1000,
+    notifications_enabled INTEGER NOT NULL DEFAULT 1
 );
 
 -- ============================================
@@ -35,6 +34,9 @@ CREATE TABLE IF NOT EXISTS telegram_groups (
     treasury_balance INTEGER NOT NULL DEFAULT 0,
     lottery_enabled INTEGER NOT NULL DEFAULT 1,
     lottery_tax_percentage INTEGER NOT NULL DEFAULT 75,
+    blackjack_min_bet INTEGER NOT NULL DEFAULT 1000,
+    blackjack_break_sec INTEGER NOT NULL DEFAULT 60,
+    blackjack_turn_sec INTEGER NOT NULL DEFAULT 45,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     is_active INTEGER DEFAULT 1
@@ -55,6 +57,9 @@ CREATE TABLE IF NOT EXISTS group_members (
     lottery_bonus_tickets INTEGER NOT NULL DEFAULT 0,
     lottery_meow_credit INTEGER NOT NULL DEFAULT 0,
     duel_rating INTEGER NOT NULL DEFAULT 1000,
+    active_title_id INTEGER,
+    active_booster_multiplier INTEGER NOT NULL DEFAULT 0,
+    active_booster_until INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (telegram_group_id, telegram_user_id)
 );
 
@@ -163,25 +168,103 @@ CREATE TABLE IF NOT EXISTS lottery_payouts (
 );
 
 -- ============================================
--- CLANS
+-- POKER (in-group Texas Hold'em)
 -- ============================================
-CREATE TABLE IF NOT EXISTS group_clans (
-    clan_id INTEGER PRIMARY KEY AUTOINCREMENT,
+CREATE TABLE IF NOT EXISTS poker_games (
+    game_id TEXT PRIMARY KEY,
     telegram_group_id INTEGER NOT NULL,
-    name TEXT NOT NULL COLLATE NOCASE,
-    owner_user_id INTEGER NOT NULL,
-    treasury_balance INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'lobby', -- lobby, playing, ended, cancelled
+    buy_in INTEGER NOT NULL,
+    host_user_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    ended_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS poker_game_players (
+    game_id TEXT NOT NULL,
+    seat INTEGER NOT NULL,
+    telegram_user_id INTEGER NOT NULL,
+    is_bot INTEGER NOT NULL DEFAULT 0,
+    buy_in INTEGER NOT NULL,
+    joined_at INTEGER NOT NULL,
+    PRIMARY KEY (game_id, seat)
+);
+
+-- ============================================
+-- TITLES (per-group titles shown in /top, won via auction)
+-- ============================================
+CREATE TABLE IF NOT EXISTS titles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    telegram_group_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    owner_user_id INTEGER,
+    status TEXT NOT NULL DEFAULT 'owned', -- owned | auctioning
+    last_price INTEGER,
+    emoji TEXT,
     created_at INTEGER NOT NULL,
     UNIQUE(telegram_group_id, name)
 );
 
-CREATE TABLE IF NOT EXISTS clan_members (
+CREATE TABLE IF NOT EXISTS title_auctions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    clan_id INTEGER NOT NULL,
+    telegram_group_id INTEGER NOT NULL,
+    title_id INTEGER,
+    start_amount INTEGER NOT NULL,
+    jump_amount INTEGER NOT NULL,
+    current_bid INTEGER,
+    current_bidder_id INTEGER,
+    current_bidder_name TEXT,
+    status TEXT NOT NULL DEFAULT 'pending_seller', -- pending_seller | open | settling | cancelling | ended | cancelled
+    board_message_id INTEGER,
+    created_at INTEGER NOT NULL,
+    ended_at INTEGER,
+    last_reposted_at INTEGER,
+    ends_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS title_auction_bids (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    auction_id INTEGER NOT NULL,
     telegram_user_id INTEGER NOT NULL,
-    role TEXT NOT NULL DEFAULT 'member',
-    joined_at INTEGER NOT NULL,
-    UNIQUE(clan_id, telegram_user_id)
+    amount INTEGER NOT NULL,
+    created_at INTEGER NOT NULL
+);
+
+-- ============================================
+-- BLACKJACK (بلک‌جک — group treasury is the house)
+-- ============================================
+CREATE TABLE IF NOT EXISTS blackjack_games (
+    game_id            TEXT PRIMARY KEY,
+    telegram_group_id  INTEGER NOT NULL,
+    status             TEXT NOT NULL DEFAULT 'lobby', -- lobby, playing, ended, cancelled
+    buy_in             INTEGER NOT NULL,
+    host_user_id       INTEGER NOT NULL,
+    message_id         INTEGER NOT NULL DEFAULT 0,
+    created_at         INTEGER NOT NULL,
+    ended_at           INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS blackjack_game_players (
+    game_id            TEXT NOT NULL,
+    seat               INTEGER NOT NULL,
+    telegram_user_id   INTEGER NOT NULL,
+    buy_in             INTEGER NOT NULL,
+    joined_at          INTEGER NOT NULL,
+    PRIMARY KEY (game_id, seat)
+);
+
+CREATE TABLE IF NOT EXISTS blackjack_player_stats (
+    telegram_group_id  INTEGER NOT NULL,
+    telegram_user_id   INTEGER NOT NULL,
+    first_name         TEXT,
+    username           TEXT,
+    hands_played       INTEGER NOT NULL DEFAULT 0,
+    blackjacks         INTEGER NOT NULL DEFAULT 0,
+    net_winnings       INTEGER NOT NULL DEFAULT 0,
+    biggest_win        INTEGER NOT NULL DEFAULT 0,
+    updated_at         INTEGER NOT NULL,
+    PRIMARY KEY (telegram_group_id, telegram_user_id)
 );
 
 -- ============================================
@@ -201,42 +284,11 @@ CREATE INDEX IF NOT EXISTS idx_treasury_transactions_reference ON group_treasury
 CREATE INDEX IF NOT EXISTS idx_lottery_rounds_group_status ON lottery_rounds(telegram_group_id, status);
 CREATE INDEX IF NOT EXISTS idx_lottery_tickets_round_user ON lottery_tickets(lottery_round_id, telegram_user_id);
 CREATE INDEX IF NOT EXISTS idx_lottery_payouts_round ON lottery_payouts(lottery_round_id);
-CREATE INDEX IF NOT EXISTS idx_clan_members_clan_user ON clan_members(clan_id, telegram_user_id);
-CREATE INDEX IF NOT EXISTS idx_group_clans_group ON group_clans(telegram_group_id);
-
--- ============================================
--- HOKM (حکم) 2v2 card game
--- ============================================
-CREATE TABLE IF NOT EXISTS hokm_games (
-  game_id        TEXT PRIMARY KEY,
-  group_id       INTEGER NOT NULL,
-  creator_id     INTEGER NOT NULL,
-  bet            INTEGER NOT NULL,
-  per_player     INTEGER NOT NULL,
-  status         TEXT NOT NULL DEFAULT 'lobby',
-  board_msg_id   INTEGER,
-  app_url        TEXT,
-  winner_team    INTEGER,
-  result         TEXT,
-  created_at     INTEGER NOT NULL,
-  started_at     INTEGER,
-  ended_at       INTEGER
-);
-
-CREATE TABLE IF NOT EXISTS hokm_game_players (
-  game_id          TEXT NOT NULL,
-  telegram_user_id INTEGER NOT NULL,
-  seat             INTEGER NOT NULL,
-  team             INTEGER NOT NULL,
-  username         TEXT,
-  first_name       TEXT NOT NULL,
-  paid             INTEGER NOT NULL DEFAULT 0,
-  accepted_at      INTEGER NOT NULL,
-  PRIMARY KEY (game_id, telegram_user_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_hokm_games_group_status ON hokm_games(group_id, status);
-CREATE INDEX IF NOT EXISTS idx_hokm_players_game ON hokm_game_players(game_id);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_hokm_games_one_active_per_group
-  ON hokm_games(group_id)
-  WHERE status IN ('lobby', 'playing');
+CREATE INDEX IF NOT EXISTS idx_poker_games_group_status ON poker_games(telegram_group_id, status);
+CREATE INDEX IF NOT EXISTS idx_poker_game_players_user ON poker_game_players(telegram_user_id);
+CREATE INDEX IF NOT EXISTS idx_blackjack_games_group_status ON blackjack_games(telegram_group_id, status);
+CREATE INDEX IF NOT EXISTS idx_blackjack_game_players_user ON blackjack_game_players(telegram_user_id);
+CREATE INDEX IF NOT EXISTS idx_blackjack_stats_net ON blackjack_player_stats(telegram_group_id, net_winnings DESC);
+CREATE INDEX IF NOT EXISTS idx_titles_group_owner ON titles(telegram_group_id, owner_user_id);
+CREATE INDEX IF NOT EXISTS idx_title_auctions_group_status ON title_auctions(telegram_group_id, status);
+CREATE INDEX IF NOT EXISTS idx_title_auction_bids_auction ON title_auction_bids(auction_id);

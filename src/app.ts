@@ -8,29 +8,35 @@ import {
   handleEvents,
   handleHistory,
   handleDuelRequest,
-  handleGlobal,
   handleGroupSettings,
   handleMe,
   handleMyChatMember,
   handlePay,
-  handleDaily,
   handleLottery,
   handleDice,
   handleTreasury,
-  handleClan,
+  handleTreasuryCommand,
+  handlePotCommand,
   handleStart,
   handleTop,
   handleDuelRank,
+  handleBooster,
+  handleGroupStats,
+  handleNotifications,
   handleCallbackQuery,
-  handleHokmRequest,
+  tierMessage,
+  randomCooldownLine,
+  meowMilestoneLine,
+  randomCatFact,
 } from "./handlers";
+import { handlePokerCommand, handlePokerReplyCancel } from "./pokerHandlers";
+import { handleBlackjackCommand, handleBlackjackReplyCancel } from "./blackjackHandlers";
+import { handleTitle, handleTitleReplyBid, titleBadge } from "./titleAuction";
 import { OWNER_COMMANDS, handleOwnerUserInfo, isOwner } from "./owner";
-import { isUserBanned, isMaintenanceMode, getGroupSettings, getGroupMemberBalance } from "./database";
+import { isUserBanned, isMaintenanceMode, getGroupSettings, getGroupMemberBalance, getActiveTitle } from "./database";
 import { telegramRequest, sendMessage } from "./telegram";
-import { escapeHtml, isMeow, formatDuration, parseReplyAction } from "./utils";
+import { escapeHtml, isMeow, formatDuration, parseReplyAction, tehranHour } from "./utils";
 import { postMeowKeyboard } from "./keyboards";
-import { validateInitData } from "./hokmAuth";
-import { isValidHokmGameId } from "./hokmLobby";
 
 const app = new Hono<{ Bindings: Bindings }>();
 
@@ -97,12 +103,24 @@ app.post("/telegram/webhook", async (c) => {
       await handleDice(token, db, c.env, message);
       return c.json({ ok: true });
     }
+    if (command === "/poker" || command === "/پوکر" || command === "poker" || command === "پوکر") {
+      await handlePokerCommand(token, db, c.env, message);
+      return c.json({ ok: true });
+    }
+    if (command === "/blackjack" || command === "/بلک‌جک" || command === "blackjack" || command === "بلک‌جک") {
+      await handleBlackjackCommand(token, db, c.env, message);
+      return c.json({ ok: true });
+    }
     if (command === "/treasury") {
       await handleTreasury(token, db, message);
       return c.json({ ok: true });
     }
-    if (command === "/clan" || command === "/clans") {
-      await handleClan(token, db, message);
+    if (command === "خزانه") {
+      await handleTreasuryCommand(token, db, c.env, message);
+      return c.json({ ok: true });
+    }
+    if (command === "پات") {
+      await handlePotCommand(token, db, c.env, message);
       return c.json({ ok: true });
     }
     if (command === "/start") {
@@ -149,30 +167,50 @@ app.post("/telegram/webhook", async (c) => {
       await handleTop(token, db, message);
       return c.json({ ok: true });
     }
-    if (command === "/global") {
-      await handleGlobal(token, db, message);
-      return c.json({ ok: true });
-    }
     if (command === "/duelrank") {
       await handleDuelRank(token, db, message);
       return c.json({ ok: true });
     }
-    if (command === "/daily") {
-      await handleDaily(token, db, message);
+    if (command === "/booster" || command === "booster") {
+      await handleBooster(token, db, message);
       return c.json({ ok: true });
     }
-    if (command === "/pay") {
+    if (command === "/groupstats" || command === "groupstats") {
+      await handleGroupStats(token, db, message);
+      return c.json({ ok: true });
+    }
+    if (command === "/notifications") {
+      await handleNotifications(token, db, message);
+      return c.json({ ok: true });
+    }
+    if (command === "/pay" || command === "pay" || command === "/انتقال" || command === "انتقال") {
       await handlePay(token, db, message);
       return c.json({ ok: true });
     }
-    if (text.startsWith("دعوا")) {
+    if (
+      text === "تایتل" ||
+      text.startsWith("<تایتل") ||
+      text.startsWith("تایتل ") ||
+      text.startsWith("/تایتل")
+    ) {
+      await handleTitle(token, db, c.env, message);
+      return c.json({ ok: true });
+    }
+    if (/^دعوا(?=[\s\u200C]|$)/.test(text)) {
       await handleDuelRequest(token, db, message);
       return c.json({ ok: true });
     }
 
-    if (command === "/hokm") {
-      await handleHokmRequest(token, db, c.env, message, c);
-      return c.json({ ok: true });
+    if (/^(cancel|لغو)$/i.test(text) && message.reply_to_message) {
+      const handledPoker = await handlePokerReplyCancel(token, db, c.env, message);
+      if (handledPoker) return c.json({ ok: true });
+      const handledBlackjack = await handleBlackjackReplyCancel(token, db, c.env, message);
+      if (handledBlackjack) return c.json({ ok: true });
+    }
+
+    if (message.reply_to_message) {
+      const handledTitleBid = await handleTitleReplyBid(token, db, c.env, message);
+      if (handledTitleBid) return c.json({ ok: true });
     }
 
     const replyAction = parseReplyAction(text);
@@ -258,7 +296,7 @@ app.post("/telegram/webhook", async (c) => {
       const result = await awardMeow(db, user, message.chat, c.env.MEOW_VIP_USER_ID);
 
       if ("cooldown" in result && result.cooldown) {
-        await sendMessage(token, message.chat.id, `⏱️ صبر کن!\n\n${formatDuration(result.cooldown)} دیگه می‌تونی میو بدی! 😸`, {
+        await sendMessage(token, message.chat.id, randomCooldownLine().replace("{duration}", formatDuration(result.cooldown)), {
           reply_to_message_id: message.message_id,
         });
         return c.json({ ok: true });
@@ -277,22 +315,46 @@ app.post("/telegram/webhook", async (c) => {
         .first<{ title: string; description: string; bonus_multiplier: number; end_at: number }>();
 
       const eventLine = activeEvent
-        ? `\n\n🎯 رویداد فعلی: <b>${activeEvent.title}</b>\n${activeEvent.description}\n💥 ضریب: x${activeEvent.bonus_multiplier}`
+        ? `\n\n🎯 رویداد فعلی: <b>${escapeHtml(activeEvent.title)}</b>\n${escapeHtml(activeEvent.description)}\n💥 ضریب: x${activeEvent.bonus_multiplier}`
         : "";
-      const eventBonusText = activeEvent && result.eventBonus > 1
-        ? `\n\n🔹 امتیاز پایه: <b>${result.basePoints} MP</b>\n🔹 ضریب رویداد: <b>x${result.eventBonus}</b>\n🔹 امتیاز نهایی: <b>${points} MP</b>`
+      // Clarify exactly where boosted points come from (same pattern as the
+      // event bonus line) whenever a multiplier is in play.
+      const bonusLines: string[] = [];
+      if (result.eventBonus > 1) bonusLines.push(`🔹 ضریب رویداد: <b>x${result.eventBonus}</b>`);
+      if (result.boosterMult > 1) bonusLines.push(`🔹 ضریب بوستر: <b>x${result.boosterMult}</b>`);
+      const bonusBreakdown = bonusLines.length
+        ? `\n\n🔹 امتیاز پایه: <b>${result.basePoints} MP</b>\n${bonusLines.join("\n")}\n🔹 امتیاز نهایی: <b>${points} MP</b>`
         : "";
       const taxText = "taxAmount" in result && result.taxAmount > 0 ? `\n\n📉 مالیات: ${result.taxAmount} MP (${Math.round(result.taxRate * 100)}%)` : "";
 
-      let response = `${tier.message(points)}\n\n💳 موجودی این گروه: <b>${balance} MP</b>${eventBonusText}${taxText}`;
+      const story = tierMessage(tier, points, tehranHour());
+
+      let response = `${story}\n\n💳 موجودی این گروه: <b>${balance} MP</b>${bonusBreakdown}${taxText}`;
       if (activeEvent) response += eventLine;
 
       if (points >= 1000) {
-        response = `🌟 <b>MEGA MEOW!!!</b> 🌟\n\n${tier.message(points)}\n💳 موجودی گروه: <b>${balance} MP</b>${eventBonusText}${taxText}`;
+        response = `🌟 <b>MEGA MEOW!!!</b> 🌟\n\n${story}\n💳 موجودی گروه: <b>${balance} MP</b>${bonusBreakdown}${taxText}`;
         if (activeEvent) response += eventLine;
       } else if (points >= 100) {
-        response = `🔥 <b>BIG MEOW!</b> 🔥\n\n${tier.message(points)}\n💳 موجودی گروه: <b>${balance} MP</b>${eventBonusText}${taxText}`;
+        response = `🔥 <b>BIG MEOW!</b> 🔥\n\n${story}\n💳 موجودی گروه: <b>${balance} MP</b>${bonusBreakdown}${taxText}`;
         if (activeEvent) response += eventLine;
+      }
+
+      if (result.lotteryTicketEarned) {
+        response += `\n\n🎁 <b>+۱ بلیت رایگان لاتاری!</b> 🎟️`;
+      }
+
+      const milestone = meowMilestoneLine(result.firstMeow, result.milestone);
+      if (milestone) response += `\n\n${milestone}`;
+
+      // ~1 in 5 meows ends with a cat fact, so even normal meows occasionally spark chat.
+      if (Math.random() < 0.2) {
+        response += `\n\n${randomCatFact()}`;
+      }
+
+      const meowTitle = await getActiveTitle(db, message.chat.id, user.id);
+      if (meowTitle) {
+        response = `${titleBadge(meowTitle.name, meowTitle.last_price, meowTitle.emoji)}\n${response}`;
       }
 
       await sendMessage(token, message.chat.id, response, {
@@ -309,32 +371,5 @@ app.post("/telegram/webhook", async (c) => {
 });
 
 app.get("/", (c) => c.json({ ok: true, bot: "Meow Points", status: "online" }));
-
-app.get("/api/hokm/:id/ws", async (c) => {
-  const upgrade = c.req.header("Upgrade");
-  if (upgrade !== "websocket") {
-    return c.json({ ok: false, error: "Expected WebSocket" }, 426);
-  }
-
-  const gameId = c.req.param("id");
-  if (!isValidHokmGameId(gameId)) {
-    return c.json({ ok: false, error: "Bad game id" }, 400);
-  }
-
-  const initData = c.req.query("initData") ?? "";
-  const auth = await validateInitData(c.env.TELEGRAM_BOT_TOKEN, initData);
-  if (!auth) {
-    return c.json({ ok: false, error: "Unauthorized" }, 401);
-  }
-
-  const headers = new Headers(c.req.raw.headers);
-  headers.set("X-Hokm-User-Id", String(auth.userId));
-  headers.set("X-Hokm-Name", auth.firstName);
-  headers.set("X-Hokm-App-Url", c.env.HOKM_APP_URL ?? new URL(c.req.url).origin);
-
-  const forwarded = new Request(c.req.raw.url, { headers, method: "POST" });
-  const stub = c.env.HOKM_GAME.get(c.env.HOKM_GAME.idFromName(gameId));
-  return stub.fetch(forwarded);
-});
 
 export default app;

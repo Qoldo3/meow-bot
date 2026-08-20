@@ -4,37 +4,15 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-03-10",
 
-  "durable_objects": {
-    "bindings": [
-      { "name": "HOKM_GAME", "class_name": "HokmGame" }
-    ]
-  },
-  "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["HokmGame"] }
-  ],
-
-  "assets": {
-    "directory": "./public",
-    "not_found_handling": "single-page-application"
-  },
-
-  // Runs every minute to clean up expired duels and Hokm lobbies.
+  // Runs every minute to clean up expired duels.
   // This is the reliable backstop for the in-request setTimeout() paths.
   "triggers": {
     "crons": ["* * * * *"]
   },
 
   "vars": {
-    // Public URL of the deployed worker (used for the Hokm WebApp button).
-    // Leave unset to auto-derive it from the incoming request origin.
-    "HOKM_APP_URL": "https://meow-bot.amirmereza.workers.dev",
     // Optional: a user id that gets boosted meow tier chances (leave empty to disable).
-    "MEOW_VIP_USER_ID": "",
-    "HOKM_JOIN_TIMEOUT_SEC": 300,
-    "HOKM_LOBBY_TIMEOUT_SEC": 60,
-    "HOKM_TURN_TIMEOUT_SEC": 60,
-    "HOKM_TRUMP_TIMEOUT_SEC": 30,
-    "HOKM_AFK_STRIKES": 2
+    "MEOW_VIP_USER_ID": "1328716728"
   },
 
   // Optional: enables the 30s active-event cache (see getActiveEvent in handlers.ts).
@@ -49,5 +27,20 @@
       "database_name": "meow-bot-db",
       "database_id": "9c2f5180-7d44-4446-9a31-ff37d73e4b0e"
     }
+  ],
+
+  // Durable Objects hosting in-group card games. One instance per game id.
+  "durable_objects": {
+    "bindings": [
+      { "name": "POKER_GAME", "class_name": "PokerGame" },
+      { "name": "BLACKJACK_GAME", "class_name": "BlackjackGame" }
+    ]
+  },
+
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["HokmGame"] },
+    { "tag": "v2", "new_sqlite_classes": ["PokerGame"] },
+    { "tag": "v3", "deleted_classes": ["HokmGame"] },
+    { "tag": "v4", "new_sqlite_classes": ["BlackjackGame"] }
   ]
 }
