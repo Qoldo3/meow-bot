@@ -920,6 +920,39 @@ export async function getActiveBoosterMultiplier(db: D1Database, groupId: number
   return row.active_booster_multiplier;
 }
 
+/**
+ * Aggregate multipliers for the dashboard's expected-earnings figures.
+ * - eventMultiplier: the active event's bonus multiplier (global, applies to
+ *   every meow; 1 when no event is running).
+ * - boosterMultiplier: the mean active booster multiplier across users (only
+ *   non-paused, unexpired boosters count — paused boosters are frozen at 1
+ *   during events). One row per user, so a user with boosters in several
+ *   groups is not weighted more than once.
+ */
+export async function getActiveEarningsMultipliers(db: D1Database): Promise<{ eventMultiplier: number; boosterMultiplier: number }> {
+  const now = Math.floor(Date.now() / 1000);
+  const event = await db
+    .prepare(`SELECT bonus_multiplier FROM events WHERE is_active = 1 AND start_at <= ? AND end_at >= ? ORDER BY created_at DESC LIMIT 1`)
+    .bind(now, now)
+    .first<{ bonus_multiplier: number }>();
+  const eventMultiplier = event?.bonus_multiplier && event.bonus_multiplier > 1 ? event.bonus_multiplier : 1;
+
+  const boosterRow = await db
+    .prepare(
+      `SELECT AVG(m) as avg_mult FROM (
+         SELECT MAX(active_booster_multiplier) as m
+         FROM group_members
+         WHERE active_booster_multiplier > 0 AND booster_paused_at = 0 AND active_booster_until > ?
+         GROUP BY telegram_user_id
+       )`
+    )
+    .bind(now)
+    .first<{ avg_mult: number | null }>();
+  const boosterMultiplier = boosterRow?.avg_mult && boosterRow.avg_mult > 1 ? boosterRow.avg_mult : 1;
+
+  return { eventMultiplier, boosterMultiplier };
+}
+
 // ---------------------------------------------------------------------------
 // Notifications — opt-out DM notifications
 // ---------------------------------------------------------------------------

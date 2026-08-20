@@ -5,6 +5,7 @@ import {
   getBoosterStatus,
   buyBooster,
   sweepBoosters,
+  getActiveEarningsMultipliers,
 } from "../src/database";
 import { computeMeowEarnings } from "../src/handlers";
 
@@ -270,5 +271,87 @@ describe("computeMeowEarnings", () => {
     const { perMeow, perHour } = await computeMeowEarnings(db);
     expect(perMeow).toBe(150);
     expect(perHour).toBe(1800);
+  });
+
+  it("scales by the active event and mean booster multipliers", async () => {
+    const db = {
+      prepare: (sql: string) => ({
+        bind: (..._args: any[]) => ({
+          first: async () => null,
+        }),
+      }),
+    } as unknown as D1Database;
+
+    const { perMeow, perHour, eventMultiplier, boosterMultiplier } = await computeMeowEarnings(db, {
+      eventMultiplier: 2,
+      boosterMultiplier: 1.5,
+    });
+    expect(eventMultiplier).toBe(2);
+    expect(boosterMultiplier).toBe(1.5);
+    expect(perMeow).toBe(1001.65);
+    expect(perHour).toBe(12020);
+  });
+
+  it("ignores multipliers at or below 1", async () => {
+    const db = {
+      prepare: (sql: string) => ({
+        bind: (..._args: any[]) => ({
+          first: async () => null,
+        }),
+      }),
+    } as unknown as D1Database;
+
+    const { perMeow, perHour, eventMultiplier, boosterMultiplier } = await computeMeowEarnings(db, {
+      eventMultiplier: 1,
+      boosterMultiplier: 0.5,
+    });
+    expect(eventMultiplier).toBe(1);
+    expect(boosterMultiplier).toBe(1);
+    expect(perMeow).toBe(333.88);
+    expect(perHour).toBe(4007);
+  });
+});
+
+describe("getActiveEarningsMultipliers", () => {
+  it("returns the active event bonus and mean non-paused booster multiplier", async () => {
+    const db = {
+      prepare: (sql: string) => ({
+        bind: (..._args: any[]) => {
+          const s = sql.toUpperCase();
+          return {
+            first: async () => {
+              if (s.includes("FROM EVENTS")) return { bonus_multiplier: 2 };
+              if (s.includes("AVG(M)")) return { avg_mult: 1.5 };
+              return null;
+            },
+          };
+        },
+      }),
+    } as unknown as D1Database;
+
+    const mult = await getActiveEarningsMultipliers(db);
+    expect(mult.eventMultiplier).toBe(2);
+    expect(mult.boosterMultiplier).toBe(1.5);
+  });
+
+  it("falls back to 1 when nothing is boosting", async () => {
+    const db = {
+      prepare: (sql: string) => ({
+        bind: (..._args: any[]) => {
+          const s = sql.toUpperCase();
+          return {
+            first: async () => {
+              if (s.includes("FROM EVENTS")) return null;
+              if (s.includes("AVG(M)")) return { avg_mult: null };
+              return null;
+            },
+          };
+        },
+      }),
+    } as unknown as D1Database;
+
+    const mult = await getActiveEarningsMultipliers(db);
+    expect(mult.eventMultiplier).toBe(1);
+    expect(mult.boosterMultiplier).toBe(1);
   });
 });

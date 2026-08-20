@@ -570,20 +570,30 @@ function pickMeowTier(tiers: MeowTierConfig[]) {
  * Expected MP per meow (probability-weighted average of the tier ranges using
  * the current config overrides, renormalized like pickMeowTier) and the
  * expected hourly earning at the default 5-minute group cooldown.
+ *
+ * The optional aggregate multipliers (active event bonus × mean active booster)
+ * scale the expected figures to reflect what users actually earn right now.
  */
-export async function computeMeowEarnings(db: D1Database): Promise<{ perMeow: number; perHour: number }> {
+export async function computeMeowEarnings(
+  db: D1Database,
+  multipliers: { eventMultiplier?: number; boosterMultiplier?: number } = {}
+): Promise<{ perMeow: number; perHour: number; eventMultiplier: number; boosterMultiplier: number }> {
+  const eventMultiplier = multipliers.eventMultiplier && multipliers.eventMultiplier > 1 ? multipliers.eventMultiplier : 1;
+  const boosterMultiplier = multipliers.boosterMultiplier && multipliers.boosterMultiplier > 1 ? multipliers.boosterMultiplier : 1;
+  const totalMultiplier = eventMultiplier * boosterMultiplier;
+
   const tiers = await getMeowTierSettings(db);
   const totalChance = tiers.reduce((sum, tier) => sum + tier.chance, 0);
-  if (totalChance <= 0) return { perMeow: 0, perHour: 0 };
+  if (totalChance <= 0) return { perMeow: 0, perHour: 0, eventMultiplier, boosterMultiplier };
 
   let ev = 0;
   for (const tier of tiers) {
     const avgPoints = (tier.minPoints + tier.maxPoints) / 2;
     ev += (tier.chance / totalChance) * avgPoints;
   }
-  const perMeow = Math.round(ev * 100) / 100;
+  const perMeow = Math.round(ev * totalMultiplier * 100) / 100;
   const meowsPerHour = 3600 / 300; // default group cooldown: 5 minutes
-  return { perMeow, perHour: Math.round(perMeow * meowsPerHour) };
+  return { perMeow, perHour: Math.round(perMeow * meowsPerHour), eventMultiplier, boosterMultiplier };
 }
 
 function formatLotteryStatusText(settings: {

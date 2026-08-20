@@ -33,6 +33,7 @@ import {
   saveBroadcastDraft,
   getBroadcastDraft,
   deleteBroadcastDraft,
+  getActiveEarningsMultipliers,
 } from "./database";
 import {
   getDuel,
@@ -160,7 +161,7 @@ export async function handleAdmin(token: string, _db: D1Database, env: Bindings,
     .prepare(`SELECT AVG(total_meows) as c FROM users WHERE telegram_id != ? AND telegram_id != ?`)
     .bind(env.BOT_OWNER_ID, env.MEOW_VIP_USER_ID ?? "-1")
     .first<{ c: number | null }>();
-  const earnings = await computeMeowEarnings(env.DB);
+  const earnings = await computeMeowEarnings(env.DB, await getActiveEarningsMultipliers(env.DB));
 
   const text =
     `🛡️ <b>Owner Panel</b>\n\n` +
@@ -172,6 +173,7 @@ export async function handleAdmin(token: string, _db: D1Database, env: Bindings,
     `🐾 میوهای امروز: <b>${n(today)}</b>\n` +
     `🐾 میانگین میو/کاربر (بدون صاحب و VIP): <b>${(avgRow?.c ?? 0).toFixed(1)}</b>\n` +
     `💎 ارزش هر میو: <b>${earnings.perMeow} MP</b> | ⏱️ درآمد ۱ ساعت: <b>${earnings.perHour} MP</b>\n` +
+    `📈 ضریب‌ها: رویداد <b>×${earnings.eventMultiplier}</b> | بوستر <b>×${earnings.boosterMultiplier.toFixed(2)}</b>\n` +
     `🎯 رویداد فعال: <b>${n(activeEvents)}</b> | ` +
     `🏷️ حراج باز: <b>${n(openAuctions)}</b> | ` +
     `⚔️ دعوای در انتظار: <b>${n(pendingDuels)}</b>\n` +
@@ -205,7 +207,7 @@ async function renderStatsPage(token: string, db: D1Database, env: Bindings, cha
     .prepare(`SELECT AVG(total_meows) as c FROM users WHERE telegram_id != ? AND telegram_id != ?`)
     .bind(env.BOT_OWNER_ID, env.MEOW_VIP_USER_ID ?? "-1")
     .first<{ c: number | null }>();
-  const earnings = await computeMeowEarnings(db);
+  const earnings = await computeMeowEarnings(db, await getActiveEarningsMultipliers(db));
   const text =
     `📊 <b>آمار ربات</b>\n\n` +
     `👤 کاربران: <b>${n(users)}</b>\n` +
@@ -216,6 +218,7 @@ async function renderStatsPage(token: string, db: D1Database, env: Bindings, cha
     `🐾 میوهای امروز: <b>${n(today)}</b>\n` +
     `🐾 میانگین میو/کاربر (بدون صاحب و VIP): <b>${(avgRow?.c ?? 0).toFixed(1)}</b>\n` +
     `💎 ارزش هر میو: <b>${earnings.perMeow} MP</b> | ⏱️ درآمد ۱ ساعت: <b>${earnings.perHour} MP</b> (کولداون ۵ دقیقه)\n` +
+    `📈 ضریب‌ها: رویداد <b>×${earnings.eventMultiplier}</b> | بوستر <b>×${earnings.boosterMultiplier.toFixed(2)}</b>\n` +
     `🎯 رویداد فعال: <b>${n(activeEvents)}</b>\n` +
     `🏷️ حراج‌های باز: <b>${n(openAuctions)}</b>\n` +
     `⚔️ دعواهای در انتظار: <b>${n(pendingDuels)}</b>\n` +
