@@ -32,22 +32,22 @@ describe("Meow Points worker", () => {
 	it("includes richer quick-action buttons in the main menu", () => {
 		const keyboard = mainMenuKeyboard();
 		const labels = keyboard.inline_keyboard.flat().map((button) => button.text);
-		expect(labels).toContain("📜 تاریخچه من");
-		expect(labels).toContain("🎉 رویدادهای گروه");
-		expect(labels).toContain("💸 انتقال امتیاز");
-		expect(labels).toContain("🆘 راهنمای دستورات");
+		expect(labels).toContain("👤✨ پروفایل من");
+		expect(labels).toContain("🎪🎉 رویدادها");
+		expect(labels).toContain("💸📤 انتقال امتیاز");
+		expect(labels).toContain("🆘📖 راهنمای دستورات");
 	});
 
 	it("includes lottery quick-buy buttons up to 10 tickets", async () => {
 		const { lotteryKeyboard } = await import("../src/keyboards");
 		const keyboard = lotteryKeyboard(false);
 		const labels = keyboard.inline_keyboard.flat().map((button) => button.text);
-		expect(labels).toContain("🎫 1 بلیت");
-		expect(labels).toContain("🎫 3 بلیت");
-		expect(labels).toContain("🎫 4 بلیت");
-		expect(labels).toContain("🎫 8 بلیت");
-		expect(labels).toContain("🎫 9 بلیت");
-		expect(labels).toContain("🎫 10 بلیت");
+		expect(labels).toContain("🎫 ۱ بلیت");
+		expect(labels).toContain("🎫 ۳ بلیت");
+		expect(labels).toContain("🎫 ۴ بلیت");
+		expect(labels).toContain("🎫 ۸ بلیت");
+		expect(labels).toContain("🎫 ۹ بلیت");
+		expect(labels).toContain("🎫 🔟 بلیت");
 	});
 
 	it("parses a valid add event command", () => {

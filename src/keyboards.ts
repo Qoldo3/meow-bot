@@ -3,37 +3,42 @@ import { BJ_BET_STEPS, POKER_RAISE_STEPS, BOOSTER_TIERS } from "./constants";
 
 const fmtRaiseStep = (n: number) => (n >= 1000 && n % 1000 === 0 ? `+${n / 1000}K` : `+${n}`);
 
-const getUserSuffix = (userId?: number) => (userId ? `:user:${userId}` : "");export function mainMenuKeyboard(userId?: number) {
+const getUserSuffix = (userId?: number) => (userId ? `:user:${userId}` : "");
+
+export function mainMenuKeyboard(userId?: number) {
   const userSuffix = getUserSuffix(userId);
   return {
     inline_keyboard: [
       [
-        { text: "👤 پروفایل من", callback_data: `cmd:me${userSuffix}` },
-        { text: "🏆 رتبه گروه", callback_data: `cmd:top${userSuffix}` },
+        { text: "👤✨ پروفایل من", callback_data: `cmd:me${userSuffix}` },
+        { text: "🏆📊 رتبه‌بندی", callback_data: `cmd:top${userSuffix}` },
       ],
       [
-        { text: "🎰 لاتاری / قمار", callback_data: `cmd:lottery${userSuffix}` },
-        { text: "تاس", callback_data: `cmd:dice${userSuffix}` },
+        { text: "🎰🎲 لاتاری / قمار", callback_data: `cmd:lottery${userSuffix}` },
+        { text: "🎲🎯 تاس", callback_data: `cmd:dice${userSuffix}` },
       ],
       [
-        { text: "🃏 پوکر گروه", callback_data: `cmd:poker${userSuffix}` },
-        { text: "♠️ بلک‌جک", callback_data: `cmd:blackjack${userSuffix}` },
+        { text: "🃏🔥 پوکر گروه", callback_data: `cmd:poker${userSuffix}` },
+        { text: "🂡💎 بلک‌جک", callback_data: `cmd:blackjack${userSuffix}` },
       ],
       [
-        { text: "💸 انتقال امتیاز", callback_data: `cmd:pay${userSuffix}` },
-        { text: "📜 تاریخچه من", callback_data: `cmd:history${userSuffix}` },
+        { text: "💸📤 انتقال امتیاز", callback_data: `cmd:pay${userSuffix}` },
+        { text: "📜🕰️ تاریخچه", callback_data: `cmd:history${userSuffix}` },
       ],
       [
-        { text: "⚔️ رتبه دعوا", callback_data: `cmd:duelrank${userSuffix}` },
-        { text: "🎉 رویدادهای گروه", callback_data: `cmd:events${userSuffix}` },
+        { text: "⚔️🥊 رتبه دعوا", callback_data: `cmd:duelrank${userSuffix}` },
+        { text: "🎪🎉 رویدادها", callback_data: `cmd:events${userSuffix}` },
       ],
       [
-        { text: "🚀 بوستر", callback_data: `cmd:booster${userSuffix}` },
-        { text: "📊 آمار گروه", callback_data: `cmd:groupstats${userSuffix}` },
+        { text: "🚀⚡ بوستر", callback_data: `cmd:booster${userSuffix}` },
+        { text: "🐱🎀 گربه‌ی من", callback_data: `cmd:cat${userSuffix}` },
       ],
       [
-        { text: "⚙️ تنظیمات گروه", callback_data: `menu:group_settings${userSuffix}` },
-        { text: "🆘 راهنمای دستورات", callback_data: `menu:help${userSuffix}` },
+        { text: "📊📈 آمار گروه", callback_data: `cmd:groupstats${userSuffix}` },
+        { text: "⚙️🔧 تنظیمات", callback_data: `menu:group_settings${userSuffix}` },
+      ],
+      [
+        { text: "🆘📖 راهنمای دستورات", callback_data: `menu:help${userSuffix}` },
       ],
     ],
   };
@@ -44,8 +49,40 @@ export function postMeowKeyboard(groupId: number, userId?: number) {
   return {
     inline_keyboard: [
       [
-        { text: "🏆 رتبه‌بندی گروه", callback_data: `cmd:top:${groupId}${userSuffix}` },
-        { text: "⚙️ مدیریت", callback_data: `menu:group_settings${userSuffix}` },
+        { text: "🏆📊 رتبه‌بندی", callback_data: `cmd:top:${groupId}${userSuffix}` },
+        { text: "🐱🎀 گربه‌ی من", callback_data: `cmd:cat${userSuffix}` },
+      ],
+      [
+        { text: "🎰🎲 لاتاری", callback_data: `cmd:lottery${userSuffix}` },
+        { text: "🚀⚡ بوستر", callback_data: `cmd:booster${userSuffix}` },
+      ],
+      [
+        { text: "⚙️🔧 تنظیمات گروه", callback_data: `menu:group_settings${userSuffix}` },
+      ],
+    ],
+  };
+}
+
+export function catAdoptKeyboard(userId?: number) {
+  const userSuffix = getUserSuffix(userId);
+  return {
+    inline_keyboard: [
+      [{ text: "🐈✨ پذیرش گربه — ۱۰۰٬۰۰۰ MP", callback_data: `cat:adopt${userSuffix}` }],
+      [{ text: "🔙 بازگشت", callback_data: `menu:main${userSuffix}` }],
+    ],
+  };
+}
+
+export function catMenuKeyboard(userId?: number) {
+  const userSuffix = getUserSuffix(userId);
+  return {
+    inline_keyboard: [
+      [
+        { text: "🍖 تغذیه (میو گربه)", callback_data: `cat:feed${userSuffix}` },
+        { text: "💸 انتقال XP", callback_data: `cat:transfer${userSuffix}` },
+      ],
+      [
+        { text: "🔄 به‌روزرسانی", callback_data: `cat:refresh${userSuffix}` },
       ],
     ],
   };
@@ -105,12 +142,12 @@ export function groupSettingsKeyboard(enabled: boolean, cooldown: number, userId
     inline_keyboard: [
       [
         {
-          text: `🤖 ربات: ${enabled ? "✅ روشن" : "❌ خاموش"}`,
+          text: `${enabled ? "🟢" : "🔴"} ربات: ${enabled ? "✅ روشن" : "❌ خاموش"}`,
           callback_data: `group:toggle_bot${userSuffix}`,
         },
       ],
-      [{ text: `⏱️ کول‌داون: ${cooldown}s`, callback_data: `group:set_cooldown${userSuffix}` }],
-      [{ text: "🔄 ریست لیدربورد", callback_data: `group:reset_lb${userSuffix}` }],
+      [{ text: `⏱️🔄 کول‌داون: ${cooldown}s`, callback_data: `group:set_cooldown${userSuffix}` }],
+      [{ text: "🗑️🔄 ریست لیدربورد", callback_data: `group:reset_lb${userSuffix}` }],
       [{ text: "🔙 بازگشت", callback_data: `menu:main${userSuffix}` }],
     ],
   };
@@ -130,42 +167,42 @@ export function lotteryKeyboard(isOwner: boolean, userId?: number, canDraw: bool
   const userSuffix = getUserSuffix(userId);
   const buttons = [
     [
-      { text: "🎫 1 بلیت", callback_data: `lottery:buy:1${userSuffix}` },
-      { text: "🎫 3 بلیت", callback_data: `lottery:buy:3${userSuffix}` },
-      { text: "🎫 4 بلیت", callback_data: `lottery:buy:4${userSuffix}` },
+      { text: "🎫 ۱ بلیت", callback_data: `lottery:buy:1${userSuffix}` },
+      { text: "🎫 ۳ بلیت", callback_data: `lottery:buy:3${userSuffix}` },
+      { text: "🎫 ۴ بلیت", callback_data: `lottery:buy:4${userSuffix}` },
     ],
     [
-      { text: "🎫 8 بلیت", callback_data: `lottery:buy:8${userSuffix}` },
-      { text: "🎫 9 بلیت", callback_data: `lottery:buy:9${userSuffix}` },
-      { text: "🎫 10 بلیت", callback_data: `lottery:buy:10${userSuffix}` },
+      { text: "🎫 ۸ بلیت", callback_data: `lottery:buy:8${userSuffix}` },
+      { text: "🎫 ۹ بلیت", callback_data: `lottery:buy:9${userSuffix}` },
+      { text: "🎫 🔟 بلیت", callback_data: `lottery:buy:10${userSuffix}` },
     ],
     [
-      { text: "📊 وضعیت لاتاری", callback_data: `lottery:status${userSuffix}` },
-      { text: "🧾 بلیت‌های من", callback_data: `lottery:my_tickets${userSuffix}` },
+      { text: "📊🔍 وضعیت لاتاری", callback_data: `lottery:status${userSuffix}` },
+      { text: "🧾🎟️ بلیت‌های من", callback_data: `lottery:my_tickets${userSuffix}` },
     ],
     [
-      { text: "❓ راهنما", callback_data: `lottery:help${userSuffix}` },
+      { text: "❓📖 راهنما", callback_data: `lottery:help${userSuffix}` },
     ],
   ];
 
   // The draw is available to the bot owner AND group admins (server-side
   // check in the lottery:draw branch); price/pot adjustments stay owner-only.
   if (canDraw) {
-    buttons.push([{ text: "🎯 قرعه‌کشی", callback_data: `lottery:draw${userSuffix}` }]);
+    buttons.push([{ text: "🎯✨ قرعه‌کشی", callback_data: `lottery:draw${userSuffix}` }]);
   }
 
   if (isOwner) {
     buttons.push([
-      { text: "➕ قیمت بلیت +50", callback_data: `lottery:adjust_price:+50${userSuffix}` },
-      { text: "➖ قیمت بلیت -50", callback_data: `lottery:adjust_price:-50${userSuffix}` },
+      { text: "🟢 قیمت بلیت +۵۰", callback_data: `lottery:adjust_price:+50${userSuffix}` },
+      { text: "🔴 قیمت بلیت −۵۰", callback_data: `lottery:adjust_price:-50${userSuffix}` },
     ]);
     buttons.push([
-      { text: "➕ پات +100", callback_data: `lottery:adjust_pot:+100${userSuffix}` },
-      { text: "➖ پات -100", callback_data: `lottery:adjust_pot:-100${userSuffix}` },
+      { text: "🟢 پات +۱۰۰", callback_data: `lottery:adjust_pot:+100${userSuffix}` },
+      { text: "🔴 پات −۱۰۰", callback_data: `lottery:adjust_pot:-100${userSuffix}` },
     ]);
   }
 
-  buttons.push([{ text: "🔙 بازگشت", callback_data: `menu:main${userSuffix}` }]);
+  buttons.push([{ text: "🔙 بازگشت به منو", callback_data: `menu:main${userSuffix}` }]);
 
   return { inline_keyboard: buttons };
 }
@@ -174,14 +211,14 @@ export function duelKeyboard(duelId: string, targetId?: number, challengerId?: n
   const targetSuffix = getUserSuffix(targetId);
   const buttons = [
     [
-      { text: "✅ قبول می‌کنم", callback_data: `duel:accept:${duelId}${targetSuffix}` },
-      { text: "❌ نه، مرسی", callback_data: `duel:decline:${duelId}${targetSuffix}` },
+      { text: "🟢⚔️ قبول می‌کنم!", callback_data: `duel:accept:${duelId}${targetSuffix}` },
+      { text: "🔴😅 نه، مرسی", callback_data: `duel:decline:${duelId}${targetSuffix}` },
     ],
   ];
   if (challengerId) {
     buttons.push([
       // Scoped to the challenger so only they can withdraw their own challenge.
-      { text: "🚫 لغو دعوا", callback_data: `duel:cancel:${duelId}${getUserSuffix(challengerId)}` },
+      { text: "🚫❌ لغو دعوا", callback_data: `duel:cancel:${duelId}${getUserSuffix(challengerId)}` },
     ]);
   }
   return { inline_keyboard: buttons };
@@ -283,13 +320,13 @@ export function eventInlineKeyboard(isOwner: boolean, hasActiveEvent: boolean, u
   }
 
   const buttons = [
-    [{ text: "➕ افزودن رویداد", callback_data: `event:add${userSuffix}` }],
+    [{ text: "🟢➕ افزودن رویداد", callback_data: `event:add${userSuffix}` }],
   ];
 
   if (hasActiveEvent) {
     buttons.push([
-      { text: "✏️ ویرایش رویداد", callback_data: `event:edit${userSuffix}` },
-      { text: "⏹️ پایان رویداد", callback_data: `event:end${userSuffix}` },
+      { text: "🟡✏️ ویرایش رویداد", callback_data: `event:edit${userSuffix}` },
+      { text: "🔴⏹️ پایان رویداد", callback_data: `event:end${userSuffix}` },
     ]);
   }
 
@@ -542,9 +579,9 @@ export function titleBoardKeyboard(auctionId: number) {
   return {
     inline_keyboard: [
       [
-        { text: "✅ Join", callback_data: `title:join:${auctionId}` },
-        { text: "⬆️ +1k", callback_data: `title:bid:${auctionId}:1k` },
-        { text: "⬆️ +5k", callback_data: `title:bid:${auctionId}:5k` },
+        { text: "🟢✅ Join", callback_data: `title:join:${auctionId}` },
+        { text: "🟡⬆️ +1k", callback_data: `title:bid:${auctionId}:1k` },
+        { text: "🟠⬆️ +5k", callback_data: `title:bid:${auctionId}:5k` },
       ],
       [
         { text: "🔢 Custom bid", callback_data: `title:bid:${auctionId}:custom` },
@@ -654,12 +691,13 @@ export function pokerTableKeyboard(gameId: string, state: PublicPokerState) {
 
 export function boosterKeyboard(userId?: number) {
   const userSuffix = getUserSuffix(userId);
+  const tierIcons = ["🟢", "🟡", "🔴", "💎"];
   return {
-    inline_keyboard: BOOSTER_TIERS.map((tier) => [
+    inline_keyboard: BOOSTER_TIERS.map((tier, i) => [
       {
-        text: `${tier.emoji} ${tier.label} — ${tier.cost.toLocaleString("en-US")} MP (${tier.durationSec / 60} min)`,
+        text: `${tierIcons[i] ?? "⚡"} ${tier.emoji} ${tier.label} — ${tier.cost.toLocaleString("en-US")} MP ⏱️${tier.durationSec / 60}m`,
         callback_data: `booster:buy:${tier.id}${userSuffix}`,
       },
-    ]).concat([[{ text: "🔙 بازگشت", callback_data: `menu:main${userSuffix}` }]]),
+    ]).concat([[{ text: "🔙 بازگشت به منو", callback_data: `menu:main${userSuffix}` }]]),
   };
 }

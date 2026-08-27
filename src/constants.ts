@@ -88,6 +88,29 @@ export const BOOSTER_TIERS: BoosterTier[] = [
 /** Minimum time between booster purchases (per user, per group). */
 export const BOOSTER_COOLDOWN_SEC = 4 * 60 * 60;
 
+// ---------------------------------------------------------------------------
+// Cats — one virtual cat per user per group
+// ---------------------------------------------------------------------------
+/** Adoption price in MP (deducted from the group balance). */
+export const CAT_ADOPT_COST = 100_000;
+/** Max length of a cat name. */
+export const CAT_NAME_MAX = 20;
+/** Default cat name until the owner renames it. */
+export const CAT_DEFAULT_NAME = "گربه";
+/** MP needed to fill a level's progress bar: CAT_LEVEL_REQ_BASE × max(1, level−1). */
+export const CAT_LEVEL_REQ_BASE = 10_000;
+/** Boost stops growing past this level (cap 8x). */
+export const CAT_LEVEL_CAP = 20;
+/** Boost tier caps reached at these levels (linear interpolation between points). */
+export const CAT_BOOST_TIERS: { level: number; cap: number }[] = [
+  { level: 0, cap: 1.0 },
+  { level: 1, cap: 1.25 },
+  { level: 5, cap: 2.0 },
+  { level: 10, cap: 3.5 },
+  { level: 15, cap: 5.5 },
+  { level: 20, cap: 8.0 },
+];
+
 export function findBoosterTier(id: string): BoosterTier | undefined {
   return BOOSTER_TIERS.find((t) => t.id === id);
 }

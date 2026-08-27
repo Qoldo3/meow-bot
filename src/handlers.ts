@@ -16,6 +16,8 @@ import {
   duelKeyboard,
   eventInlineKeyboard,
   boosterKeyboard,
+  catAdoptKeyboard,
+  catMenuKeyboard,
 } from "./keyboards";
 import {
   ensureUser,
@@ -26,7 +28,6 @@ import {
   getUserStats,
   getGroupMemberBalance,
   getGroupRank,
-  getGroupDailyLeaderboard,
   findUserByUsername,
   distributeGroupTax,
 
@@ -63,16 +64,30 @@ import {
   safeParseAmount,
   normalizeUsername,
   isMeow,
+  isMeowCat,
   generateDuelId,
   isValidDuelId,
   parseEventCommand,
   toEnglishNumbers,
+  tehranHour,
 } from "./utils";
 import { handleAdmin, handleOwnerPanelAction } from "./owner";
 import { handlePokerCallback, handlePokerCommand } from "./pokerHandlers";
 import { handleBlackjackCallback, handleBlackjackCommand } from "./blackjackHandlers";
 import { handleTitleCallback, titleBadge } from "./titleAuction";
-import { findBoosterTier, BOOSTER_COOLDOWN_SEC } from "./constants";
+import {
+  adoptCat,
+  catBoostForLevel,
+  catLevelRequirement,
+  feedCat,
+  formatXpBar,
+  getCat,
+  getTopCats,
+  notifyCatEvents,
+  renderCatCard,
+  transferToCat,
+} from "./cats";
+import { findBoosterTier, BOOSTER_COOLDOWN_SEC, CAT_ADOPT_COST, CAT_DEFAULT_NAME, CAT_NAME_MAX } from "./constants";
 import {
   Bindings,
   DuelState,
@@ -434,7 +449,7 @@ function getMeowTaxRateByRank(rank: number): number {
 }
 
 type AwardMeowResult =
-  | { points: number; basePoints: number; eventBonus: number; tier: MeowTierConfig; taxAmount: number; taxRate: number; lotteryTicketEarned: boolean; milestone: boolean; firstMeow: boolean; cooldown: false; boosterMult: number }
+  | { points: number; basePoints: number; eventBonus: number; tier: MeowTierConfig; taxAmount: number; taxRate: number; lotteryTicketEarned: boolean; milestone: boolean; firstMeow: boolean; cooldown: false; boosterMult: number; catMult: number; milestoneMult: number }
   | { cooldown: number };
 
 export type MeowTierConfig = {
@@ -601,8 +616,6 @@ function formatLotteryStatusText(settings: {
   lotteryTicketPrice: number;
   lotteryPot: number;
   lotteryTicketSales: number;
-  meowTaxPool: number;
-  duelTaxPool: number;
 }) {
   return (
     `🎟️ <b>لاتاری گروه</b>
@@ -615,10 +628,6 @@ function formatLotteryStatusText(settings: {
     `💰 پات فعلی: <b>${settings.lotteryPot} MP</b>
 ` +
     `🎫 فروش بلیت: <b>${settings.lotteryTicketSales} MP</b>
-` +
-    `📊 مالیات میو: <b>${settings.meowTaxPool} MP</b>
-` +
-    `📊 مالیات دعوا: <b>${settings.duelTaxPool} MP</b>
 
 ` +
     `🔢 هر بلیت شامل 6 عدد یکتا از 1 تا 49 است.
@@ -743,11 +752,20 @@ export async function awardMeow(
 
     // Apply active booster multiplier (silent, per-group)
     const boosterMult = await getActiveBoosterMultiplier(db, chat.id, user.id);
-    const boostedNetPoints = Math.round(netPoints * boosterMult);
+    let boostedNetPoints = Math.round(netPoints * boosterMult);
+
+    // Cat boost: a cat multiplies meow earnings by its level tier.
+    let catMult = 1;
+    const catRow = await getCat(db, chat.id, user.id);
+    if (catRow) {
+      catMult = catBoostForLevel(catRow.level);
+      if (catMult > 1) boostedNetPoints = Math.round(boostedNetPoints * catMult);
+    }
 
     // Read the current meow-credit so we can tell whether this meow completes a
-    // batch of 3 and earns a free lottery ticket. Safe under the group cooldown
-    // (a user can only earn one meow per cooldown window).
+    // batch of 3 and earns a free lottery ticket, and whether it's a 10th-meow
+    // milestone. Safe under the group cooldown (a user can only earn one meow
+    // per cooldown window).
     const creditRow = await db
       .prepare(`SELECT lottery_meow_credit, total_meows FROM group_members WHERE telegram_group_id = ? AND telegram_user_id = ?`)
       .bind(chat.id, user.id)
@@ -757,6 +775,13 @@ export async function awardMeow(
     const newTotalMeows = prevTotalMeows + 1;
     const milestone = newTotalMeows % 10 === 0;
     const firstMeow = prevTotalMeows === 0;
+
+    // Milestone multiplier: every 10th meow gets 10× on the final points.
+    let milestoneMult = 1;
+    if (milestone) {
+      milestoneMult = 10;
+      boostedNetPoints = Math.round(boostedNetPoints * milestoneMult);
+    }
 
     const result = await db.prepare(`
       INSERT INTO group_members (
@@ -796,7 +821,7 @@ export async function awardMeow(
 
     await db.batch(operations);
 
-    return { points: boostedNetPoints, basePoints, eventBonus, tier, taxAmount, taxRate, lotteryTicketEarned, milestone, firstMeow, cooldown: false, boosterMult };
+    return { points: boostedNetPoints, basePoints, eventBonus, tier, taxAmount, taxRate, lotteryTicketEarned, milestone, firstMeow, cooldown: false, boosterMult, catMult, milestoneMult };
   }
 
   await db.batch([
@@ -805,7 +830,7 @@ export async function awardMeow(
       .bind(user.id, null, effectivePoints, "MEOW", now),
   ]);
 
-  return { points: effectivePoints, basePoints, eventBonus, tier, taxAmount: 0, taxRate: 0, lotteryTicketEarned: false, milestone: false, firstMeow: false, cooldown: false, boosterMult: 1 };
+  return { points: effectivePoints, basePoints, eventBonus, tier, taxAmount: 0, taxRate: 0, lotteryTicketEarned: false, milestone: false, firstMeow: false, cooldown: false, boosterMult: 1, catMult: 1, milestoneMult: 1 };
 }
 
 export async function handleStart(token: string, db: D1Database, env: Bindings, message: TelegramMessage) {
@@ -817,7 +842,7 @@ export async function handleStart(token: string, db: D1Database, env: Bindings, 
   // Register the bot menu once per deployment instead of on every /start
   // (an extra Telegram API call per user for zero benefit).
   const registered = await db.prepare(`SELECT value FROM bot_settings WHERE key = 'commands_registered'`).first<{ value: string }>();
-  if (registered?.value !== "1") {
+  if (registered?.value !== "2") {
     await setMyCommands(token, [
       { command: "start", description: "شروع کار با ربات" },
       { command: "me", description: "پروفایل من" },
@@ -834,10 +859,11 @@ export async function handleStart(token: string, db: D1Database, env: Bindings, 
       { command: "groupstats", description: "آمار گروه" },
       { command: "duelrank", description: "رتبه‌بندی دعوا" },
       { command: "notifications", description: "مدیریت اعلان‌ها" },
+      { command: "cat", description: "🐱 گربه‌ی من" },
       { command: "treasury", description: "خزانه گروه" },
       { command: "settings", description: "تنظیمات گروه" },
     ]);
-    await db.prepare(`INSERT INTO bot_settings (key, value) VALUES ('commands_registered', '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run();
+    await db.prepare(`INSERT INTO bot_settings (key, value) VALUES ('commands_registered', '2') ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run();
   }
 
   const isPm = message.chat.type === "private";
@@ -917,6 +943,220 @@ export async function handleMe(token: string, db: D1Database, env: Bindings, mes
   text += `\n✨ برای رشد بیشتر، توی گروه‌ها میو بگو و با دوستانت دعوا کن.`;
 
   await sendMessage(token, message.chat.id, text, { reply_markup: mainMenuKeyboard(message.from?.id) });
+}
+
+/** "گربه" / "cat" — cat card, adoption prompt, or rename via "گربه اسم {name}". */
+export async function handleCat(token: string, db: D1Database, env: Bindings, message: TelegramMessage) {
+  if (!message.from) return;
+  if (message.chat.type === "private") {
+    await sendMessage(token, message.chat.id, "🐱 گربه فقط داخل گروه کار می‌کند!");
+    return;
+  }
+
+  const text = message.text?.trim() ?? "";
+  const renameMatch = text.match(/^(?:گربه اسم|cat name|گربه‌اسم|catname|\/catname)\s+(.+)$/i);
+  if (renameMatch) {
+    const cat = await getCat(db, message.chat.id, message.from.id);
+    if (!cat) {
+      await sendMessage(token, message.chat.id, "🐱 اول یک گربه بگیر! با <code>گربه</code> پذیرش کن.", { reply_to_message_id: message.message_id });
+      return;
+    }
+    const newName = renameMatch[1].trim().slice(0, CAT_NAME_MAX);
+    if (!newName) {
+      await sendMessage(token, message.chat.id, "🐱 نام گربه نمی‌تواند خالی باشد!", { reply_to_message_id: message.message_id });
+      return;
+    }
+    await db
+      .prepare(`UPDATE cats SET name = ?, updated_at = ? WHERE telegram_group_id = ? AND telegram_user_id = ?`)
+      .bind(newName, Math.floor(Date.now() / 1000), message.chat.id, message.from.id)
+      .run();
+    await sendMessage(token, message.chat.id, `✅ نام گربه به <b>${escapeHtml(newName)}</b> تغییر کرد.`, { reply_to_message_id: message.message_id });
+    return;
+  }
+
+  const cat = await getCat(db, message.chat.id, message.from.id);
+  if (!cat) {
+    const balance = await getGroupMemberBalance(db, message.chat.id, message.from.id);
+    await sendMessage(
+      token,
+      message.chat.id,
+      `🐱 تو هنوز گربه نداری!\n\n🐈 <b>پذیرش گربه</b>\n💰 هزینه: ${CAT_ADOPT_COST.toLocaleString("en-US")} MP\n📈 بونوس اولیه: ×1.25 (تا ×8 با سطح)\n\n` +
+        `با دکمه‌ی زیر پذیرش کن، یا بعداً با <code>گربه</code> برگرد.\n💳 موجودی این گروه: <b>${balance} MP</b>`,
+      { reply_markup: catAdoptKeyboard(message.from?.id) }
+    );
+    return;
+  }
+
+  const card = renderCatCard(cat, catBoostForLevel(cat.level));
+  await sendMessage(token, message.chat.id, card, { reply_markup: catMenuKeyboard(message.from?.id) });
+}
+
+/** Adoption confirm callback (cat:adopt). */
+export async function handleCatAdopt(token: string, db: D1Database, callback: TelegramCallbackQuery) {
+  if (!callback.message) return;
+  if (callback.message.chat.type === "private") {
+    await answerCallback(token, callback.id, "پذیرش گربه فقط داخل گروه انجام می‌شود!", true);
+    return;
+  }
+
+  const existing = await getCat(db, callback.message.chat.id, callback.from.id);
+  if (existing) {
+    await answerCallback(token, callback.id, "تو در این گروه گربه داری!", true);
+    return;
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  const result = await adoptCat(db, callback.message.chat.id, callback.from.id, null, now);
+  if (!result.ok || !result.cat) {
+    await answerCallback(token, callback.id, `امتیاز کافی در این گروه نداری! (نیاز: ${CAT_ADOPT_COST.toLocaleString("en-US")} MP)`, true);
+    return;
+  }
+
+  await answerCallback(token, callback.id, "🐈 گربه پذیرفته شد! 🎉");
+  const card = renderCatCard(result.cat, catBoostForLevel(result.cat.level));
+  const message =
+    `🐱 گربه‌ی شما به نام <b>${escapeHtml(result.cat.name ?? CAT_DEFAULT_NAME)}</b> متولد شد! 🎉\n\n` +
+    `🍖 با <code>میو گربه</code> یا <code>انتقال گربه {amount}</code> تغذیه‌اش کن. (شما ۰ امتیاز می‌گیرید و گربه سیر می‌شود)\n\n` +
+    card;
+  await editMessageText(token, callback.message.chat.id, callback.message.message_id, message, catMenuKeyboard(callback.from.id));
+}
+
+/** "میو گربه" / "meow cat" — feed the cat instead of earning points. */
+export async function handleMeowCat(token: string, db: D1Database, env: Bindings, message: TelegramMessage) {
+  if (!message.from) return;
+
+  if (message.chat.type === "private") {
+    await sendMessage(
+      token,
+      message.chat.id,
+      "🐱 میو گربه فقط داخل گروه کار می‌کند! اول گربه‌ات را در گروه بپذیر و بعد اینجا تغذیه‌اش کن. 😸"
+    );
+    return;
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  await ensureUser(db, message.from);
+  await ensureGroup(db, message.chat);
+
+  const settings = await getGroupSettings(db, message.chat.id);
+  if (!settings.enabled) return;
+
+  const cat = await getCat(db, message.chat.id, message.from.id);
+  if (!cat) {
+    await sendMessage(token, message.chat.id, "🐱 اول یک گربه بگیر! با <code>گربه</code> پذیرش کن.", { reply_to_message_id: message.message_id });
+    return;
+  }
+
+  // میو گربه shares the same cooldown slot as میو — one feed per cooldown.
+  // The UPSERT guard atomically claims the slot (and seeds the member row).
+  const claim = await db
+    .prepare(`
+      INSERT INTO group_members (telegram_group_id, telegram_user_id, username, first_name, total_meows, last_meow_at)
+      VALUES (?, ?, ?, ?, 0, ?)
+      ON CONFLICT(telegram_group_id, telegram_user_id) DO UPDATE SET
+        username = excluded.username,
+        first_name = excluded.first_name,
+        last_meow_at = excluded.last_meow_at
+      WHERE group_members.last_meow_at IS NULL OR group_members.last_meow_at < ?
+    `)
+    .bind(message.chat.id, message.from.id, message.from.username ?? null, message.from.first_name, now, now - settings.cooldown)
+    .run();
+  if (claim.meta.changes === 0) {
+    const row = await db.prepare(`SELECT last_meow_at FROM group_members WHERE telegram_group_id = ? AND telegram_user_id = ?`)
+      .bind(message.chat.id, message.from.id).first<{ last_meow_at: number }>();
+    const remaining = row ? Math.max(0, settings.cooldown - (now - row.last_meow_at)) : settings.cooldown;
+    await sendMessage(token, message.chat.id, randomCooldownLine().replace("{duration}", formatDuration(remaining)), { reply_to_message_id: message.message_id });
+    return;
+  }
+
+  // Same tier roll as a regular meow (event + booster multipliers apply), but
+  // the whole value feeds the cat — the user receives 0 points and no tax.
+  const tiers = await getMeowTierSettings(db);
+  const adjustedTiers = adjustMeowTierChancesForSpecialUser(tiers, message.from.id, env.MEOW_VIP_USER_ID);
+  const tier = pickMeowTier(adjustedTiers);
+  const activeEvent = await db
+    .prepare(`SELECT bonus_multiplier FROM events WHERE is_active = 1 AND start_at <= ? AND end_at >= ? ORDER BY created_at DESC LIMIT 1`)
+    .bind(now, now)
+    .first<{ bonus_multiplier: number }>();
+  const eventBonus = activeEvent?.bonus_multiplier && activeEvent.bonus_multiplier > 1 ? activeEvent.bonus_multiplier : 1;
+  const rawPoints = tier.minPoints === tier.maxPoints
+    ? tier.minPoints
+    : Math.floor(Math.random() * (tier.maxPoints - tier.minPoints + 1)) + tier.minPoints;
+  const effectivePoints = Math.max(0, Math.round(rawPoints * eventBonus));
+  const boosterMult = await getActiveBoosterMultiplier(db, message.chat.id, message.from.id);
+  const catFill = Math.round(effectivePoints * boosterMult);
+
+  const { cat: updatedCat, leveledUp } = await feedCat(db, message.chat.id, message.from.id, catFill, now);
+  const req = catLevelRequirement(updatedCat.level);
+  const name = escapeHtml(updatedCat.name ?? CAT_DEFAULT_NAME);
+  const boost = catBoostForLevel(updatedCat.level);
+  const pct = req > 0 ? Math.min(100, Math.floor((updatedCat.progress / req) * 100)) : 100;
+  const bonusLines: string[] = [];
+  if (eventBonus > 1) bonusLines.push(`🔹 ضریب رویداد: <b>x${eventBonus}</b>`);
+  if (boosterMult > 1) bonusLines.push(`🔹 ضریب بوستر: <b>x${boosterMult}</b>`);
+
+  let reply =
+    `${tierMessage(tier, catFill, tehranHour())}\n` +
+    `🐱 <b>${name}</b> سیر شد! 🍖\n` +
+    `+${catFill.toLocaleString("en-US")} XP به گربه (شما ۰ MP — بدون مالیات)\n` +
+    (bonusLines.length > 0 ? bonusLines.join("\n") + "\n\n" : "\n") +
+    `📊 XP: ${updatedCat.progress.toLocaleString("en-US")} / ${req.toLocaleString("en-US")} MP\n` +
+    `${formatXpBar(pct)} ${pct}%\n` +
+    `⬆️ بونوس میو: ×${boost}`;
+
+  if (leveledUp > 0) {
+    reply += `\n\n🎉 <b>${name}</b> به Lv.${updatedCat.level} رسید! بونوس میو حالا ×${boost}`;
+  }
+
+  await sendMessage(token, message.chat.id, reply, { reply_to_message_id: message.message_id });
+
+  await notifyCatEvents(token, db, message.chat.id, message.from.id, { leveledUp }, env.BOT_OWNER_ID);
+}
+
+/** "انتقال گربه {amount}" / "cat transfer {amount}" — wallet → cat XP, 1:1. */
+export async function handleCatTransfer(token: string, db: D1Database, env: Bindings, message: TelegramMessage) {
+  if (!message.from) return;
+  if (message.chat.type === "private") {
+    await sendMessage(token, message.chat.id, "🐱 انتقال گربه فقط داخل گروه کار می‌کند!");
+    return;
+  }
+
+  const text = message.text ?? "";
+  const amountMatch = toEnglishNumbers(text).match(/^(?:انتقال گربه|cat transfer)\s+(\d+)$/i);
+  const amount = amountMatch ? safeParseAmount(amountMatch[1]) : null;
+  if (amount === null) {
+    await sendMessage(token, message.chat.id, "🐱 نحوه استفاده:\n<code>انتقال گربه 5000</code>", { reply_to_message_id: message.message_id });
+    return;
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  const cat = await getCat(db, message.chat.id, message.from.id);
+  if (!cat) {
+    await sendMessage(token, message.chat.id, "🐱 اول یک گربه بگیر! با <code>گربه</code> پذیرش کن.", { reply_to_message_id: message.message_id });
+    return;
+  }
+
+  const result = await transferToCat(db, message.chat.id, message.from.id, amount, now);
+  if (!result.ok || !result.cat) {
+    if (result.reason === "no_cat") {
+      await sendMessage(token, message.chat.id, "🐱 اول یک گربه بگیر! با <code>گربه</code> پذیرش کن.", { reply_to_message_id: message.message_id });
+      return;
+    }
+    const balance = await getGroupMemberBalance(db, message.chat.id, message.from.id);
+    await sendMessage(token, message.chat.id, `🐱 امتیاز کافی در این گروه نداری!\n💳 موجودی گروه: ${balance} MP`, { reply_to_message_id: message.message_id });
+    return;
+  }
+
+  const req = catLevelRequirement(result.cat.level);
+  const name = escapeHtml(result.cat.name ?? CAT_DEFAULT_NAME);
+  await sendMessage(
+    token,
+    message.chat.id,
+    `✅ ${amount.toLocaleString("en-US")} MP به XP گربه اضافه شد.\n🐱 <b>${name}</b> — 📊 XP: ${result.cat.progress.toLocaleString("en-US")} / ${req.toLocaleString("en-US")} MP`,
+    { reply_to_message_id: message.message_id }
+  );
+
+  await notifyCatEvents(token, db, message.chat.id, message.from.id, { leveledUp: result.leveledUp }, env.BOT_OWNER_ID);
 }
 
 export async function handleHistory(token: string, db: D1Database, message: TelegramMessage) {
@@ -1104,9 +1344,14 @@ export async function handleTop(token: string, db: D1Database, message: Telegram
 
   let text = `🏆 <b>Meow Leaderboard</b>\n\n${formatLeaderboard(results.results)}${ownLine}`;
 
-  const daily = await getGroupDailyLeaderboard(db, message.chat.id, 5);
-  if (daily.results.length) {
-    text += `\n\n📅 <b>Daily Group Leaderboard</b>\n` + daily.results.map((row, index) => `• ${index + 1}. ${escapeHtml(row.first_name)} — ${row.today_points} MP`).join("\n");
+  const cats = await getTopCats(db, message.chat.id, 5);
+  if (cats.results.length) {
+    text += `\n\n🐈 <b>Top Cats</b>\n` + cats.results.map((row, index) => {
+      const req = catLevelRequirement(row.level);
+      const pct = req > 0 ? Math.min(100, Math.floor((row.progress / req) * 100)) : 0;
+      const sad = row.level <= 0 ? " ⚠️" : "";
+      return `• ${index + 1}. 🐱 ${escapeHtml(row.name)} — Lv.${row.level} (${pct}%)${sad}`;
+    }).join("\n");
   }
 
   await sendMessage(token, message.chat.id, text);
@@ -1573,12 +1818,8 @@ export async function getLotteryTicketSummary(db: D1Database, groupId: number, u
 }
 
 function formatLotteryHelpText(settings: {
-  lotteryEnabled: boolean;
   lotteryTicketPrice: number;
   lotteryPot: number;
-  lotteryTicketSales: number;
-  meowTaxPool: number;
-  duelTaxPool: number;
 }) {
   return (
     `🎲 <b>راهنمای لاتاری و قمار</b>\n\n` +
@@ -2151,6 +2392,10 @@ export async function handleCallbackQuery(
       else if (params[0] === "blackjack") await handleBlackjackCommand(token, db, env, fakeMessage);
       else if (params[0] === "booster") await handleBooster(token, db, fakeMessage);
       else if (params[0] === "groupstats") await handleGroupStats(token, db, fakeMessage);
+      else if (params[0] === "cat") {
+        const catMsg: TelegramMessage = { message_id: messageId, from: callback.from, chat: callback.message.chat, text: "گربه" };
+        await handleCat(token, db, env, catMsg);
+      }
 
       await answerCallback(token, callback.id);
       return;
@@ -2244,6 +2489,33 @@ export async function handleCallbackQuery(
       return;
     }
 
+    if (action === "cat") {
+      if (params[0] === "adopt") {
+        await handleCatAdopt(token, db, callback);
+      } else if (params[0] === "refresh") {
+        const fakeMessage: TelegramMessage = {
+          message_id: messageId,
+          from: callback.from,
+          chat: callback.message.chat,
+          text: "گربه",
+        };
+        await handleCat(token, db, env, fakeMessage);
+        await answerCallback(token, callback.id);
+      } else if (params[0] === "feed") {
+        const fakeMessage: TelegramMessage = {
+          message_id: messageId,
+          from: callback.from,
+          chat: callback.message.chat,
+          text: "میو گربه",
+        };
+        await handleMeowCat(token, db, env, fakeMessage);
+        await answerCallback(token, callback.id);
+      } else if (params[0] === "transfer") {
+        await answerCallback(token, callback.id, "📝 برای انتقال XP به گربه، بنویس:\nانتقال گربه 5000", true);
+      }
+      return;
+    }
+
     if (action === "poker") {
       await handlePokerCallback(token, db, env, callback);
       return;
@@ -2289,28 +2561,24 @@ export async function handleCallbackQuery(
     }
 
     if (action === "lottery") {
-      const { userId: scopedUserId, params: lotteryParams } = parseUserScopedParams(params);
-      if (scopedUserId && scopedUserId !== userId) {
-        await answerCallback(token, callback.id, "🚫 این دکمه فقط برای کسی است که پیام را باز کرده است.", true);
-        return;
-      }
+      // params already has the user suffix stripped by the outer parseUserScopedParams.
       const canDraw = env.BOT_OWNER_ID === String(userId) || await isGroupAdmin(token, chatId, userId);
 
-      if (lotteryParams[0] === "status") {
+      if (params[0] === "status") {
         const text = await getLotteryStatusText(db, chatId, userId);
         await editMessageText(token, chatId, messageId, text, lotteryKeyboard(env.BOT_OWNER_ID === String(userId), userId, canDraw));
         await answerCallback(token, callback.id);
         return;
       }
 
-      if (lotteryParams[0] === "my_tickets") {
+      if (params[0] === "my_tickets") {
         const text = await getLotteryTicketSummary(db, chatId, userId);
         await editMessageText(token, chatId, messageId, text, lotteryKeyboard(env.BOT_OWNER_ID === String(userId), userId, canDraw));
         await answerCallback(token, callback.id);
         return;
       }
 
-      if (lotteryParams[0] === "help") {
+      if (params[0] === "help") {
         const settings = await getGroupLotteryConfig(db, chatId);
         const isOwner = env.BOT_OWNER_ID === String(userId);
         await editMessageText(token, chatId, messageId, formatLotteryHelpText(settings), lotteryKeyboard(isOwner, userId, canDraw));
@@ -2318,7 +2586,7 @@ export async function handleCallbackQuery(
         return;
       }
 
-      if (lotteryParams[0] === "buy") {
+      if (params[0] === "buy") {
         if (!callback.from || !callback.message) {
           await answerCallback(token, callback.id, "❌ درخواست نامعتبر", true);
           return;
@@ -2328,7 +2596,7 @@ export async function handleCallbackQuery(
           await answerCallback(token, callback.id, "🎟️ لاتاری فعلا غیرفعال است.", true);
           return;
         }
-        const count = lotteryParams.length >= 2 ? parseInt(lotteryParams[1], 10) : 1;
+        const count = params.length >= 2 ? parseInt(params[1], 10) : 1;
         if (!Number.isFinite(count) || count <= 0 || count > 10) {
           await answerCallback(token, callback.id, "🐱 تعداد بلیت نامعتبر است. حداکثر 10 بلیت مجاز است.", true);
           return;
@@ -2358,7 +2626,7 @@ export async function handleCallbackQuery(
         return;
       }
 
-      if (lotteryParams[0] === "draw") {
+      if (params[0] === "draw") {
         if (env.BOT_OWNER_ID !== String(userId)) {
           const isAdmin = await isGroupAdmin(token, chatId, userId);
           if (!isAdmin) {
@@ -2426,7 +2694,7 @@ export async function handleCallbackQuery(
         return;
       }
 
-      if (lotteryParams[0] === "adjust_price") {
+      if (params[0] === "adjust_price") {
         if (env.BOT_OWNER_ID !== String(userId)) {
           await answerCallback(token, callback.id, "🚫 فقط صاحب ربات!", true);
           return;
@@ -2440,7 +2708,7 @@ export async function handleCallbackQuery(
         return;
       }
 
-      if (lotteryParams[0] === "adjust_pot") {
+      if (params[0] === "adjust_pot") {
         if (env.BOT_OWNER_ID !== String(userId)) {
           await answerCallback(token, callback.id, "🚫 فقط صاحب ربات!", true);
           return;

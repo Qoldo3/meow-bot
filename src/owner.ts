@@ -95,6 +95,21 @@ const OWNER_CONFIG_SETTINGS: { key: string; label: string; type: "int" | "float"
   { key: "meow_galaxy_min", label: "گربه‌ی کهکشانی: حداقل امتیاز", type: "int", defaultValue: "2201" },
   { key: "meow_galaxy_max", label: "گربه‌ی کهکشانی: حداکثر امتیاز", type: "int", defaultValue: "3000" },
   { key: "meow_galaxy_chance", label: "گربه‌ی کهکشانی: احتمال", type: "float", defaultValue: "0.0005" },
+  { key: "meow_supernova_min", label: "گربه‌ی ابرنواختری: حداقل امتیاز", type: "int", defaultValue: "3001" },
+  { key: "meow_supernova_max", label: "گربه‌ی ابرنواختری: حداکثر امتیاز", type: "int", defaultValue: "4000" },
+  { key: "meow_supernova_chance", label: "گربه‌ی ابرنواختری: احتمال", type: "float", defaultValue: "0.0003" },
+  { key: "meow_phoenix_min", label: "گربه‌ی ققنوسی: حداقل امتیاز", type: "int", defaultValue: "4001" },
+  { key: "meow_phoenix_max", label: "گربه‌ی ققنوسی: حداکثر امتیاز", type: "int", defaultValue: "5500" },
+  { key: "meow_phoenix_chance", label: "گربه‌ی ققنوسی: احتمال", type: "float", defaultValue: "0.0002" },
+  { key: "meow_dragon_min", label: "گربه‌ی اژدهایی: حداقل امتیاز", type: "int", defaultValue: "5501" },
+  { key: "meow_dragon_max", label: "گربه‌ی اژدهایی: حداکثر امتیاز", type: "int", defaultValue: "7500" },
+  { key: "meow_dragon_chance", label: "گربه‌ی اژدهایی: احتمال", type: "float", defaultValue: "0.00015" },
+  { key: "meow_shadow_min", label: "گربه‌ی سایه: حداقل امتیاز", type: "int", defaultValue: "7501" },
+  { key: "meow_shadow_max", label: "گربه‌ی سایه: حداکثر امتیاز", type: "int", defaultValue: "10000" },
+  { key: "meow_shadow_chance", label: "گربه‌ی سایه: احتمال", type: "float", defaultValue: "0.0001" },
+  { key: "meow_cosmic_god_min", label: "خدای کیهانی: حداقل امتیاز", type: "int", defaultValue: "10001" },
+  { key: "meow_cosmic_god_max", label: "خدای کیهانی: حداکثر امتیاز", type: "int", defaultValue: "15000" },
+  { key: "meow_cosmic_god_chance", label: "خدای کیهانی: احتمال", type: "float", defaultValue: "0.00005" },
 ];
 
 /** Resolve a user by numeric ID (any digit script) or @username. */

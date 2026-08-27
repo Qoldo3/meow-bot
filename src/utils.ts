@@ -26,6 +26,12 @@ export function isMeow(text: string): boolean {
   return false;
 }
 
+/** "میو گربه" / "meow cat" — a meow destined to the cat instead of the wallet. */
+export function isMeowCat(text: string): boolean {
+  const normalized = text.toLowerCase().split(" ").filter(Boolean).join(" ").trim();
+  return /^\/?(میو گربه|meow cat|میوگربه|meowcat)$/.test(normalized);
+}
+
 export function generateDuelId(): string {
   return Math.random().toString(36).substring(2, 10);
 }

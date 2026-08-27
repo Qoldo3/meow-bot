@@ -24,6 +24,9 @@ import {
   handleGroupStats,
   handleNotifications,
   handleCallbackQuery,
+  handleCat,
+  handleMeowCat,
+  handleCatTransfer,
   tierMessage,
   randomCooldownLine,
   meowMilestoneLine,
@@ -35,7 +38,7 @@ import { handleTitle, handleTitleReplyBid, titleBadge } from "./titleAuction";
 import { OWNER_COMMANDS, handleOwnerUserInfo, handleOwnerPendingText, isOwner } from "./owner";
 import { isUserBanned, isMaintenanceMode, getGroupSettings, getGroupMemberBalance, getActiveTitle } from "./database";
 import { telegramRequest, sendMessage } from "./telegram";
-import { escapeHtml, isMeow, formatDuration, parseReplyAction, tehranHour } from "./utils";
+import { escapeHtml, isMeow, isMeowCat, formatDuration, parseReplyAction, tehranHour } from "./utils";
 import { postMeowKeyboard } from "./keyboards";
 
 const app = new Hono<{ Bindings: Bindings }>();
@@ -188,7 +191,8 @@ app.post("/telegram/webhook", async (c) => {
       await handleNotifications(token, db, message);
       return c.json({ ok: true });
     }
-    if (command === "/pay" || command === "pay" || command === "/انتقال" || command === "انتقال") {
+    // "انتقال گربه {amount}" is the cat-transfer command, not /pay.
+    if ((command === "/pay" || command === "pay" || command === "/انتقال" || command === "انتقال") && !/^انتقال گربه/i.test(text)) {
       await handlePay(token, db, message);
       return c.json({ ok: true });
     }
@@ -276,6 +280,21 @@ app.post("/telegram/webhook", async (c) => {
       }
     }
 
+    if (isMeowCat(text)) {
+      await handleMeowCat(token, db, c.env, message);
+      return c.json({ ok: true });
+    }
+
+    if (/^(انتقال گربه|cat transfer)/i.test(text)) {
+      await handleCatTransfer(token, db, c.env, message);
+      return c.json({ ok: true });
+    }
+
+    if (text === "گربه" || text === "cat" || text === "/cat" || text.startsWith("گربه اسم") || text.startsWith("گربه‌اسم") || text.startsWith("cat name") || text.startsWith("catname") || text.startsWith("/catname")) {
+      await handleCat(token, db, c.env, message);
+      return c.json({ ok: true });
+    }
+
     if (isMeow(text)) {
       if (message.chat.type === "private") {
         const botInfo = await telegramRequest(token, "getMe", {});
@@ -327,6 +346,8 @@ app.post("/telegram/webhook", async (c) => {
       const bonusLines: string[] = [];
       if (result.eventBonus > 1) bonusLines.push(`🔹 ضریب رویداد: <b>x${result.eventBonus}</b>`);
       if (result.boosterMult > 1) bonusLines.push(`🔹 ضریب بوستر: <b>x${result.boosterMult}</b>`);
+      if ("catMult" in result && result.catMult > 1) bonusLines.push(`🔹 ضریب گربه: <b>x${result.catMult}</b>`);
+      if ("milestoneMult" in result && result.milestoneMult > 1) bonusLines.push(`🎉 ضریب میو دهم: <b>x${result.milestoneMult}</b>`);
       const bonusBreakdown = bonusLines.length
         ? `\n\n🔹 امتیاز پایه: <b>${result.basePoints} MP</b>\n${bonusLines.join("\n")}\n🔹 امتیاز نهایی: <b>${points} MP</b>`
         : "";
