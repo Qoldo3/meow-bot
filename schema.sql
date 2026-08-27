@@ -1,5 +1,5 @@
 -- ============================================
--- Consolidated schema (source of truth: migrations/0000..0007 + 0010..0018)
+-- Consolidated schema (source of truth: migrations/0000..0007 + 0010..0021)
 -- ============================================
 
 -- ============================================
@@ -267,6 +267,22 @@ CREATE TABLE IF NOT EXISTS blackjack_player_stats (
     updated_at         INTEGER NOT NULL,
     PRIMARY KEY (telegram_group_id, telegram_user_id)
 );
+
+-- ============================================
+-- CATS (per-group virtual cat adoption)
+-- ============================================
+CREATE TABLE IF NOT EXISTS cats (
+    telegram_group_id INTEGER NOT NULL,
+    telegram_user_id INTEGER NOT NULL,
+    name TEXT,
+    level INTEGER NOT NULL DEFAULT 1,
+    progress INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (telegram_group_id, telegram_user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_cats_level ON cats(telegram_group_id, level DESC, progress DESC);
 
 -- ============================================
 -- INDEXES FOR PERFORMANCE

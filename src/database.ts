@@ -1,5 +1,4 @@
 import { TelegramChat, TelegramUser } from "./types";
-import { tehranDayStart } from "./utils";
 import { BOOSTER_COOLDOWN_SEC } from "./constants";
 
 export async function ensureUser(db: D1Database, user: TelegramUser) {
@@ -123,14 +122,7 @@ export async function getGroupLotteryConfig(db: D1Database, groupId: number) {
   };
 }
 
-export async function addGroupTaxPool(db: D1Database, groupId: number, type: "meow" | "duel", amount: number) {
-  if (amount <= 0) return;
-  const field = type === "meow" ? "meow_tax_pool" : "duel_tax_pool";
-  await db
-    .prepare(`UPDATE telegram_groups SET ${field} = COALESCE(${field}, 0) + ?, lottery_pot = COALESCE(lottery_pot, 0) + ? WHERE telegram_group_id = ?`)
-    .bind(amount, amount, groupId)
-    .run();
-}
+
 
 export async function addLotteryTicketSale(db: D1Database, groupId: number, ticketPrice: number, ticketCount: number) {
   if (ticketPrice <= 0 || ticketCount <= 0) return;
@@ -218,13 +210,16 @@ export async function purchaseLotteryTickets(
     const allocated = await allocatePendingLotteryTickets(db, groupId);
 
     const now = Math.floor(Date.now() / 1000);
-    // Distribute funds: 75% lottery, 25% treasury
-    const lotteryContribution = Math.floor(totalCost * 0.75);
+    // Read the group's lottery_tax_percentage (default 75) to split ticket
+    // revenue between the pot and the treasury. The percentage controls how
+    // much of each ticket sale feeds the lottery pot.
+    const groupCfg = await db.prepare(`SELECT treasury_balance, lottery_tax_percentage FROM telegram_groups WHERE telegram_group_id = ?`).bind(groupId).first<{ treasury_balance: number; lottery_tax_percentage: number }>();
+    const taxPct = groupCfg?.lottery_tax_percentage ?? 75;
+    const lotteryContribution = Math.floor(totalCost * taxPct / 100);
     const treasuryContribution = totalCost - lotteryContribution;
 
     // Read current treasury balance for ledger
-    const before = await db.prepare(`SELECT treasury_balance FROM telegram_groups WHERE telegram_group_id = ?`).bind(groupId).first<{ treasury_balance: number }>();
-    const balanceBefore = before?.treasury_balance ?? 0;
+    const balanceBefore = groupCfg?.treasury_balance ?? 0;
     const balanceAfter = balanceBefore + treasuryContribution;
 
     const assignedNumbers: string[] = [];
@@ -496,23 +491,6 @@ export async function getGroupRank(db: D1Database, groupId: number, userId: numb
   return result?.rank ?? 0;
 }
 
-export async function getGroupDailyLeaderboard(db: D1Database, groupId: number, limit: number = 10) {
-  // "Today" is Tehran midnight (UTC+3:30), not UTC midnight — meows after
-  // 20:30 UTC belong to the next Tehran day.
-  const today = tehranDayStart();
-  return db
-    .prepare(`
-      SELECT u.first_name, u.username, SUM(t.amount) AS today_points
-      FROM transactions t
-      JOIN users u ON u.telegram_id = t.telegram_user_id
-      WHERE t.group_id = ? AND t.reason = 'MEOW' AND t.created_at >= ?
-      GROUP BY t.telegram_user_id
-      ORDER BY today_points DESC
-      LIMIT ?
-    `)
-    .bind(groupId, today, limit)
-    .all<{ first_name: string; username: string | null; today_points: number }>();
-}
 
 export async function isMaintenanceMode(db: D1Database): Promise<boolean> {
   const row = await db.prepare(`SELECT value FROM bot_settings WHERE key = 'maintenance'`).first<{ value: string }>();
